@@ -1,0 +1,10 @@
+{
+  "name": "etaamiyo",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "medyas-db", "migrations_dir": "migrations" }
+  ],
+  "triggers": { "crons": ["* * * * *"] }
+}
