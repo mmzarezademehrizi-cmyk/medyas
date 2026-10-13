@@ -1,0 +1,11 @@
+{
+  "secrets": [
+    {"name": "BOT_TOKEN", "prompt": "توکن ربات تلگرام این پروژه (از @BotFather؛ می‌تواند ربات جدیدی باشد)"},
+    {"name": "ADMIN_IDS", "prompt": "آیدی عددی تلگرام شما (مدیر). چند مدیر: با کاما جدا کنید. از @userinfobot بگیرید."},
+    {"name": "SECRET_KEY", "generate": "urlsafe"},
+    {"name": "WEBHOOK_SECRET", "generate": "hex"},
+    {"name": "EITAA_API_BASE", "prompt": "اختیاری: آدرس رله‌ی ایتایار اگر مستقیم کار نکرد (پیش‌فرض https://eitaayar.ir/api)", "optional": true}
+  ],
+  "webhook": {"botTokenSecret": "BOT_TOKEN", "path": "/tg/{WEBHOOK_SECRET}", "secretToken": "WEBHOOK_SECRET"},
+  "health": "/health"
+}
