@@ -5,11 +5,20 @@ export class EitaaNetworkError extends EitaaError {}
 
 export interface PostOpts { title?: string; silent?: boolean; pin?: boolean; viewDelete?: number }
 
+// Eitaayar's API path is /api/bot<id>:<uuid>/<method>. Users may paste the token with or
+// without the leading "bot"; the base may or may not already end with "/bot".
+function eitaaUrl(env: Env, token: string, method: string): string {
+  const base = eitaaBase(env).replace(/\/+$/, "").replace(/\/bot$/i, "");
+  const t = token.trim().replace(/^bot/i, "");
+  return `${base}/bot${t}/${method}`;
+}
+
 async function call(env: Env, token: string, method: string, form: FormData): Promise<any> {
-  const clean = (m: string) => m.split(token).join("***");
+  const raw = token.trim().replace(/^bot/i, "");
+  const clean = (m: string) => m.split(raw).join("***").split(token).join("***");
   let r: Response;
   try {
-    r = await fetch(`${eitaaBase(env)}/${token}/${method}`, { method: "POST", body: form });
+    r = await fetch(eitaaUrl(env, token, method), { method: "POST", body: form });
   } catch (e) {
     throw new EitaaNetworkError(clean(`${(e as Error).name}: ${(e as Error).message}`));
   }
