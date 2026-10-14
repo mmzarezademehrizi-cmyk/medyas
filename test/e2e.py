@@ -136,20 +136,24 @@ check("good rubika token stored", any("ربات روبیکا ثبت شد" in t f
 check("rubika token encrypted at rest", "rbtoken_ABC" not in d1("SELECT value FROM settings WHERE key='rubika_token_enc'"))
 
 # ---------------- Rubika: connect a channel only when the bot can post there
-clear(); cb(USER, "rb:add"); msg(USER, "cNOADMIN0001"); settle()
+clear(); cb(USER, "rb:add"); msg(USER, "cNOADMIN0000000000000001"); settle()
 check("bot not admin -> channel refused", any("ادمین" in t and "❌" in t for t in sent_to(USER)), str(sent_to(USER)))
-clear(); msg(USER, "cGHOST00001"); settle()
+clear(); msg(USER, "cGHOST0000000000000001"); settle()
 check("unknown rubika channel refused", any("❌" in t for t in sent_to(USER)))
-clear(); msg(USER, "https://rubika.ir/cCHAN0000001"); settle()
-check("rubika channel connected", any("کانال روبیکا" in t and "اضافه شد" in t for t in sent_to(USER)), str(sent_to(USER)))
+clear(); msg(USER, "https://rubika.ir/mychannel"); settle()
+check("username/link explained (rubika needs the internal id) with a find button", any("rb:find" in str(e["body"].get("reply_markup", "")) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage"))
+clear(); cb(USER, "rb:find"); settle()
+check("auto-discovery lists only channels (not the user's private chat)", any("rb:pk:cCHAN0000000000000001" in str(e["body"].get("reply_markup", "")) and "b0USERCHAT" not in str(e["body"].get("reply_markup", "")) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage"), str(log()[-3:]))
+clear(); cb(USER, "rb:pk:cCHAN0000000000000001"); settle()
+check("rubika channel connected via discovery", any("کانال روبیکا" in t and "اضافه شد" in t for t in sent_to(USER)), str(sent_to(USER)))
 check("probe message was cleaned up", len(rb_calls("deleteMessage")) >= 1)
-clear(); cb(USER, "rb:add"); msg(USER, "cCHAN0000001"); settle()
+clear(); cb(USER, "rb:add"); msg(USER, "https://rubika.ir/cCHAN0000000000000001"); settle()
 check("duplicate rubika channel refused", any("قبلاً" in t for t in sent_to(USER)))
 
 # ---------------- Rubika: delivery (text, title prefix, silent) through the same pipeline
 rid = d1("SELECT id FROM channels WHERE platform='rubika'").split('"id": ')[1].split()[0].strip(",}")
 clear(); msg(USER, "✍️ پست جدید"); cb(USER, f"np:c:{rid}"); msg(USER, "سلام روبیکا"); cb(USER, "np:silent"); cb(USER, "np:now"); time.sleep(3)
 rs = [e for e in rb_calls("sendMessage") if e["body"].get("text") == "سلام روبیکا"]
-check("post delivered to rubika", len(rs) == 1 and rs[0]["body"]["chat_id"] == "cCHAN0000001" and rs[0]["body"].get("disable_notification") is True, str(rb_calls("sendMessage")))
+check("post delivered to rubika", len(rs) == 1 and rs[0]["body"]["chat_id"] == "cCHAN0000000000000001" and rs[0]["body"].get("disable_notification") is True, str(rb_calls("sendMessage")))
 check("eitaa untouched by a rubika post", not eitaa_calls("sendMessage"))
 print("ALL E2E CHECKS PASSED")

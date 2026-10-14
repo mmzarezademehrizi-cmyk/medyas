@@ -87,3 +87,28 @@ export function normalizeRubikaChat(raw: string): string {
   const m = t.match(/rubika\.ir\/(?:joinc\/)?([^/?\s]+)/i);
   return (m ? m[1] : t).replace(/^@/, "").trim();
 }
+
+/** Rubika's API only accepts the internal chat id (GUID) of a channel, not @username or links. */
+export const isGuid = (id: string): boolean => /^[A-Za-z0-9]{20,}$/.test(id);
+
+export async function getUpdates(env: Env, token: string, limit = 100): Promise<any[]> {
+  const d = await call(env, token, "getUpdates", { limit });
+  return Array.isArray(d?.updates) ? d.updates : [];
+}
+
+/** Channels the bot has recently seen activity in (the bot must already be an admin there). */
+export async function discoverChannels(env: Env, token: string): Promise<{ chat_id: string; title: string }[]> {
+  const ids: string[] = [];
+  for (const u of await getUpdates(env, token)) {
+    const id = String(u?.chat_id ?? u?.new_message?.chat_id ?? "");
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  const out: { chat_id: string; title: string }[] = [];
+  for (const id of ids.slice(-10)) {
+    try {
+      const chat = await getChat(env, token, id);
+      if (/channel/i.test(String(chat?.chat_type || chat?.type || ""))) out.push({ chat_id: id, title: String(chat?.title || id).slice(0, 100) });
+    } catch { /* not resolvable: skip */ }
+  }
+  return out;
+}

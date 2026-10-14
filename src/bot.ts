@@ -154,9 +154,14 @@ async function gotRename(c: Ctx, u: UserRow, d: Record<string, any>, text: strin
 }
 
 // ------------------------------------------------------------------ rubika
+const rbFindKb = () => ikb([[["🔎 پیدا کردن خودکار کانال", "rb:find"]]]);
+const rbGuide = (uname: string) =>
+  `<b>🟣 اتصال کانال روبیکا</b>\n\n1️⃣ ربات ${uname ? "@" + esc(uname) : "ما"} را به کانال خود اضافه کنید\n2️⃣ آن را «ادمین» کنید (با اجازه‌ی ارسال پیام)\n3️⃣ یک پیام دلخواه در کانال بگذارید\n4️⃣ دکمه‌ی زیر را بزنید 👇\n\nیا اگر شناسه‌ی داخلی کانال (GUID) را دارید همین‌جا بفرستید. لغو: /cancel`;
 async function gotRbChan(c: Ctx, u: UserRow, text: string): Promise<void> {
   const { env } = c, cid = rubika.normalizeRubikaChat(text);
   if (!cid || cid.length < 3 || /\s/.test(cid)) return void (await tg.send(env, u.id, "❌ آیدی معتبر نیست. دوباره بفرستید (یا /cancel)."));
+  if (!rubika.isGuid(cid))
+    return void (await tg.send(env, u.id, "ℹ️ روبیکا به ربات‌ها فقط شناسه‌ی داخلی کانال را می‌دهد، نه @آیدی یا لینک.\nربات را ادمین کنید، یک پیام در کانال بگذارید و دکمه‌ی زیر را بزنید 👇", rbFindKb()));
   if ((await userChannels(env, u.id)).some((x) => x.platform === "rubika" && x.chat_id === cid)) return void (await tg.send(env, u.id, "این کانال قبلاً اضافه شده است."));
   if ((await userChannels(env, u.id)).length >= MAX_CHANNELS) { await clearSession(env, u.id); return void (await tg.send(env, u.id, `حداکثر ${MAX_CHANNELS} کانال مجاز است.`)); }
   const token = await rubikaToken(env);
@@ -317,7 +322,27 @@ async function onCallback(c: Ctx, q: TgCallback): Promise<void> {
     let uname = "";
     try { uname = String((await rubika.getMe(env, t))?.username || ""); } catch { /* guide still works */ }
     await setSession(env, uid, "rb_chan", {});
-    return void (await tg.send(env, uid, `<b>🟣 اتصال کانال روبیکا</b>\n\n1️⃣ ربات ${uname ? "@" + esc(uname) : "مادیر"} را به کانال خود اضافه کنید\n2️⃣ آن را «ادمین» کنید (با اجازه‌ی ارسال پیام)\n3️⃣ آیدی کانال را همین‌جا بفرستید\n\nلغو: /cancel`));
+    return void (await tg.send(env, uid, rbGuide(uname), rbFindKb()));
+  }
+  if (kind === "rb" && act === "find") {
+    await tg.answer(env, q.id, "در حال جست‌وجو…");
+    const t = await rubikaToken(env);
+    if (!t) return void (await tg.send(env, uid, "⏳ اتصال روبیکا هنوز فعال نشده است."));
+    let found: { chat_id: string; title: string }[] = [];
+    try { found = await rubika.discoverChannels(env, t); } catch (e) { return void (await tg.send(env, uid, `❌ ${esc((e as Error).message)}`)); }
+    const have = new Set((await userChannels(env, uid)).filter((x) => x.platform === "rubika").map((x) => x.chat_id));
+    found = found.filter((f) => !have.has(f.chat_id));
+    if (!found.length) return void (await tg.send(env, uid, "🤷 کانالی پیدا نشد.\nمطمئن شوید ربات ادمین کانال است، یک پیام تازه در کانال بگذارید و دوباره امتحان کنید.", rbFindKb()));
+    return void (await tg.send(env, uid, "کدام کانال؟", ikb(found.map((f) => [[`🟣 ${f.title}`.slice(0, 40), `rb:pk:${f.chat_id}`] as Btn]))));
+  }
+  if (kind === "rb" && act === "pk") {
+    await tg.answer(env, q.id);
+    const t = await rubikaToken(env), cid = (q.data || "").split(":")[2] || "";
+    if (!t || !rubika.isGuid(cid)) return;
+    if ((await userChannels(env, uid)).some((x) => x.platform === "rubika" && x.chat_id === cid)) return void (await tg.send(env, uid, "این کانال قبلاً اضافه شده است."));
+    const v = await rubika.verifyChannel(env, t, cid);
+    if (!v.ok) return void (await tg.send(env, uid, `❌ ${esc(v.reason)}`));
+    return saveChannel(c, user, cid, v.title || cid, "rubika");
   }
   if (kind === "ad" && admin) {
     await tg.answer(env, q.id);

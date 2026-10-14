@@ -48,7 +48,9 @@ async def rubika(req):
     if m == "getChat":
         if "GHOST" in cid:
             return web.json_response({"status": "INVALID_INPUT", "status_det": "chat not found"})
-        return web.json_response({"status": "OK", "data": {"chat": {"chat_id": cid, "chat_type": "Channel", "title": "کانال روبیکا"}}})
+        return web.json_response({"status": "OK", "data": {"chat": {"chat_id": cid, "chat_type": "User" if cid.startswith("b0") else "Channel", "title": "کانال روبیکا"}}})
+    if m == "getUpdates":
+        return web.json_response({"status": "OK", "data": {"updates": [{"type": "NewMessage", "chat_id": "cCHAN0000000000000001"}, {"type": "NewMessage", "chat_id": "b0USERCHAT000000000001"}], "next_offset_id": ""}})
     if m == "sendMessage":
         if "NOADMIN" in cid:
             return web.json_response({"status": "INVALID_ACCESS", "status_det": "bot is not admin"})
