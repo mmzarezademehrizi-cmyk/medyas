@@ -1,6 +1,7 @@
 import { handleUpdate } from "./bot";
 import { Env, tgBase } from "./env";
 import { tick } from "./scheduler";
+import { handleSite } from "./site";
 import { TgUpdate } from "./tg";
 
 export default {
@@ -25,6 +26,7 @@ export default {
       catch (e) { console.error("update failed", (e as Error).message); }   // always 200: Telegram must not retry-loop on our bugs
       return new Response("ok");
     }
+    if (req.method === "GET" || req.method === "HEAD") { const site = await handleSite(env, url.pathname); if (site) return site; }
     return new Response("not found", { status: 404 });
   },
 

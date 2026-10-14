@@ -2,6 +2,7 @@
 # Starts the fake services + the Worker (workerd, local D1), runs the e2e suite, then stops everything.
 cd "$(dirname "$0")/.."
 rm -rf .wrangler && npx wrangler d1 migrations apply medyas-db --local >/dev/null 2>&1
+grep -q RUBIKA_API_BASE .dev.vars 2>/dev/null || echo "RUBIKA_API_BASE=http://127.0.0.1:9999/rubika" >> .dev.vars
 python3 test/mock_servers.py >/tmp/mock.log 2>&1 &
 MOCK=$!
 npx wrangler dev --local --port 8787 --test-scheduled >/tmp/wdev.log 2>&1 &

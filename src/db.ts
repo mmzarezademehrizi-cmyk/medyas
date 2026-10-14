@@ -1,3 +1,4 @@
+import { dec, enc } from "./crypto";
 import { Env } from "./env";
 
 export interface UserRow {
@@ -31,3 +32,14 @@ export const getUser = (env: Env, id: number) => env.DB.prepare("SELECT * FROM u
 export const getChannel = (env: Env, id: number) => env.DB.prepare("SELECT * FROM channels WHERE id=?").bind(id).first<ChannelRow>();
 export const userChannels = async (env: Env, uid: number) =>
   (await env.DB.prepare("SELECT * FROM channels WHERE user_id=? ORDER BY id").bind(uid).all<ChannelRow>()).results;
+
+// Platform-level Rubika bot token: RUBIKA_BOT_TOKEN secret wins, otherwise the one the admin saved from the bot (encrypted).
+export async function rubikaToken(env: Env): Promise<string> {
+  if (env.RUBIKA_BOT_TOKEN && env.RUBIKA_BOT_TOKEN.trim()) return env.RUBIKA_BOT_TOKEN.trim();
+  const r = await env.DB.prepare("SELECT value FROM settings WHERE key='rubika_token_enc'").first<{ value: string }>();
+  return r ? await dec(env.SECRET_KEY, r.value) : "";
+}
+export async function saveRubikaToken(env: Env, token: string): Promise<void> {
+  await env.DB.prepare("INSERT INTO settings(key,value) VALUES('rubika_token_enc',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(await enc(env.SECRET_KEY, token)).run();
+}
+export const clearRubikaToken = (env: Env) => env.DB.prepare("DELETE FROM settings WHERE key='rubika_token_enc'").run();

@@ -1,14 +1,24 @@
 // Delivery of posts: called right away for "send now" and from the cron tick for scheduled ones.
 import { dec } from "./crypto";
-import { ChannelRow, PostRow, UserRow, now } from "./db";
+import { ChannelRow, PostRow, UserRow, now, rubikaToken } from "./db";
 import * as eitaa from "./eitaa";
 import { Env } from "./env";
+import * as rubika from "./rubika";
 import * as tg from "./tg";
 import { esc, fmtDt } from "./util";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+async function sendRubika(env: Env, token: string, p: PostRow, ch: ChannelRow): Promise<string> {
+  const text = (p.title ? `🏷 ${p.title}\n\n` : "") + p.text;
+  const o = { silent: !!p.silent };
+  return p.kind === "text"
+    ? rubika.sendMessage(env, token, ch.chat_id, text, o)
+    : rubika.sendFile(env, token, ch.chat_id, p.file_name || "file", await tg.download(env, p.file_id), text, o);
+}
+
 async function sendOnce(env: Env, token: string, p: PostRow, ch: ChannelRow): Promise<string> {
+  if (ch.platform === "rubika") return sendRubika(env, token, p, ch);
   const o: eitaa.PostOpts = { title: p.title || undefined, silent: !!p.silent, pin: !!p.pin, viewDelete: p.view_delete || undefined };
   const res = p.kind === "text"
     ? await eitaa.sendMessage(env, token, ch.chat_id, p.text, o)
@@ -29,18 +39,19 @@ export async function deliver(env: Env, postId: number): Promise<void> {
     await tg.send(env, p.user_id, `❌ ارسال پست #${p.id} ناموفق بود:\n${esc(msg)}`);
   };
   if (!user || !ch) return fail("کاربر یا کانال دیگر وجود ندارد.");
-  const token = await dec(env.SECRET_KEY, user.eitaa_token_enc);
-  if (!token) return fail("توکن ایتایار ثبت نشده یا نامعتبر است. آن را دوباره در «برنامه‌های متصل» ثبت کنید.");
+  const isRb = ch.platform === "rubika";
+  const token = isRb ? await rubikaToken(env) : await dec(env.SECRET_KEY, user.eitaa_token_enc);
+  if (!token) return fail(isRb ? "ربات روبیکا فعلاً در دسترس نیست. با مدیر تماس بگیرید." : "توکن ایتایار ثبت نشده یا نامعتبر است. آن را دوباره در «برنامه‌های متصل» ثبت کنید.");
   let last = "";
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const mid = await sendOnce(env, token, p, ch);
       await env.DB.prepare("UPDATE posts SET status='sent', sent_at=?, eitaa_message_id=?, error='' WHERE id=?").bind(now(), mid, p.id).run();
-      await tg.send(env, p.user_id, `✅ پست #${p.id} در «${esc(ch.title)}» ارسال شد.`);
+      await tg.send(env, p.user_id, `✅ پست #${p.id} در ${isRb ? "🟣" : "🟠"} «${esc(ch.title)}» ارسال شد.`);
       return;
     } catch (e) {
       last = (e as Error).message;
-      const retryable = e instanceof eitaa.EitaaNetworkError;
+      const retryable = e instanceof eitaa.EitaaNetworkError || e instanceof rubika.RubikaNetworkError;
       if (!retryable || attempt === 2) break;
       await sleep(2000 * (attempt + 1));
     }

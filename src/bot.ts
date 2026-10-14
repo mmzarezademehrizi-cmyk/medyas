@@ -1,13 +1,14 @@
 import { enc } from "./crypto";
-import { ChannelRow, PostRow, UserRow, clearSession, getChannel, getSession, getUser, now, setSession, touchUser, userChannels } from "./db";
+import { ChannelRow, PostRow, UserRow, clearRubikaToken, clearSession, getChannel, getSession, getUser, now, rubikaToken, saveRubikaToken, setSession, touchUser, userChannels } from "./db";
 import * as eitaa from "./eitaa";
 import { Env, adminIds } from "./env";
+import * as rubika from "./rubika";
 import { deliver } from "./scheduler";
 import * as tg from "./tg";
-import { Kb, TgCallback, TgMessage, TgUpdate, ikb } from "./tg";
+import { Btn, Kb, TgCallback, TgMessage, TgUpdate, ikb } from "./tg";
 import { esc, fmtDt, normalizeChatId, parseWhen } from "./util";
 
-export const B = { NEW: "پست جدید", SCHED: "زمان‌بندی‌شده‌ها", CHAN: "کانال‌ها", APPS: "برنامه‌های متصل", ME: "حساب من", HELP: "راهنما", ADMIN: "مدیریت" };
+export const B = { NEW: "✍️ پست جدید", SCHED: "⏰ زمان‌بندی‌شده‌ها", CHAN: "📣 کانال‌ها", APPS: "🔌 برنامه‌های متصل", ME: "👤 حساب من", HELP: "💡 راهنما", ADMIN: "🛠 مدیریت" };
 const MENU = new Set(Object.values(B));
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_CHANNELS = 20;
@@ -19,7 +20,7 @@ const mainKb = (admin: boolean) => ({
 });
 const isAdmin = (env: Env, uid: number) => adminIds(env).includes(uid);
 const hasAccess = (u: UserRow, admin: boolean) => admin || (!!u.expires_at && u.expires_at > now());
-const NO_ACCESS = "⛔️ اشتراک فعال ندارید. برای فعال‌سازی با مدیر تماس بگیرید.";
+const NO_ACCESS = "🔒 اشتراک فعال ندارید.\nبرای فعال‌سازی با مدیر تماس بگیرید.";
 
 // ------------------------------------------------------------------ entry
 export async function handleUpdate(c: Ctx, u: TgUpdate): Promise<void> {
@@ -51,6 +52,8 @@ async function onMessage(c: Ctx, m: TgMessage): Promise<void> {
   if (!hasAccess(user, admin) && s.state) { await clearSession(env, uid); return void (await tg.send(env, uid, NO_ACCESS)); }
   switch (s.state) {
     case "token": return gotToken(c, user, m, text);
+    case "rb_chan": return gotRbChan(c, user, text);
+    case "rb_token": return admin ? gotRbToken(c, user, m, text) : undefined;
     case "chan_id": return gotChanId(c, user, text);
     case "chan_title": return gotChanTitle(c, user, s.data, text);
     case "chan_rename": return gotRename(c, user, s.data, text);
@@ -77,17 +80,24 @@ async function menu(c: Ctx, user: UserRow, admin: boolean, text: string): Promis
 }
 
 const welcome = (u: UserRow, admin: boolean) =>
-  `سلام ${esc(u.name || "")} 👋\nبا این ربات می‌توانید در کانال‌های ایتای خود پست فوری یا زمان‌بندی‌شده بگذارید.\n` +
-  (hasAccess(u, admin) ? "از منوی پایین شروع کنید." : NO_ACCESS);
-const HELP = "<b>راهنما</b>\n\n1) «برنامه‌های متصل»: توکن ایتایار خود را ثبت کنید.\n2) «کانال‌ها»: آیدی یا لینک کانال را اضافه کنید (حساب ایتایار باید در کانال ادمین باشد).\n" +
-  "3) «پست جدید»: کانال را انتخاب و متن یا فایل (تا ۲۰ مگابایت) را بفرستید؛ سپس «ارسال الان» یا «زمان‌بندی».\n\n" +
-  "نمونه زمان: <code>18:30</code> · <code>فردا 09:00</code> · <code>+45</code> (۴۵ دقیقه بعد) · <code>1405/07/20 18:30</code>";
+  `سلام ${esc(u.name || "")} 👋\n\n✨ پست فوری یا زمان‌بندی‌شده در کانال‌های <b>ایتا</b> و <b>روبیکا</b>، از همین‌جا.\n\n` +
+  (hasAccess(u, admin) ? "از منوی پایین شروع کنید 👇" : NO_ACCESS);
+const HELP = "<b>💡 راهنما</b>\n\n" +
+  "1️⃣ <b>برنامه‌های متصل</b>: توکن ایتایار را ثبت کنید یا کانال روبیکا را وصل کنید\n" +
+  "2️⃣ <b>کانال‌ها</b>: کانال را اضافه کنید (حساب یا ربات باید در کانال ادمین باشد)\n" +
+  "3️⃣ <b>پست جدید</b>: کانال را انتخاب و متن یا فایل (تا ۲۰ مگابایت) را بفرستید؛ سپس ارسال یا زمان‌بندی\n\n" +
+  "⏱ نمونه زمان: <code>18:30</code> · <code>فردا 09:00</code> · <code>+45</code> · <code>1405/07/20 18:30</code>";
 
 // ------------------------------------------------------------------ token
 async function apps(env: Env, u: UserRow): Promise<void> {
-  const has = !!u.eitaa_token_enc;
-  await tg.send(env, u.id, `<b>برنامه‌های متصل</b>\n\nایتایار: ${has ? "✅ متصل" + (u.eitaa_account ? ` (${esc(u.eitaa_account)})` : "") : "❌ متصل نیست"}`,
-    ikb([[[has ? "🔑 تغییر توکن" : "🔑 ثبت توکن ایتایار", "tk:set"]], ...(has ? [[["🗑 حذف توکن", "tk:del"] as [string, string]]] : [])]));
+  const has = !!u.eitaa_token_enc, rb = !!(await rubikaToken(env));
+  const nRb = (await userChannels(env, u.id)).filter((x) => x.platform === "rubika").length;
+  const rows: Btn[][] = [[[has ? "🔑 تغییر توکن ایتایار" : "🔑 ثبت توکن ایتایار", "tk:set"]]];
+  if (has) rows.push([["🗑 حذف توکن ایتایار", "tk:del"]]);
+  if (rb) rows.push([["🟣 اتصال کانال روبیکا", "rb:add"]]);
+  await tg.send(env, u.id,
+    `<b>🔌 برنامه‌های متصل</b>\n\n🟠 ایتایار: ${has ? "✅ متصل" + (u.eitaa_account ? ` (${esc(u.eitaa_account)})` : "") : "❌ متصل نیست"}\n` +
+    `🟣 روبیکا: ${rb ? (nRb ? `✅ ${nRb} کانال متصل` : "⚪️ آماده‌ی اتصال") : "⏳ به‌زودی"}`, ikb(rows));
 }
 async function gotToken(c: Ctx, u: UserRow, m: TgMessage, text: string): Promise<void> {
   const { env } = c;
@@ -101,19 +111,21 @@ async function gotToken(c: Ctx, u: UserRow, m: TgMessage, text: string): Promise
   const account = String(me?.username || me?.first_name || me?.name || "").slice(0, 60);
   await env.DB.prepare("UPDATE users SET eitaa_token_enc=?, eitaa_account=? WHERE id=?").bind(await enc(env.SECRET_KEY, token), account, u.id).run();
   await clearSession(env, u.id);
-  await tg.send(env, u.id, "✅ توکن ایتایار ثبت شد.", mainKb(isAdmin(env, u.id)));
+  await tg.send(env, u.id, "✅ توکن ایتایار ثبت شد 🎉", mainKb(isAdmin(env, u.id)));
 }
 
 // ------------------------------------------------------------------ channels
+const icon = (ch: ChannelRow) => (ch.platform === "rubika" ? "🟣" : "🟠");
 async function channels(env: Env, uid: number): Promise<void> {
-  const list = await userChannels(env, uid);
-  await tg.send(env, uid, list.length ? "<b>کانال‌های شما</b>" : "هنوز کانالی اضافه نکرده‌اید.",
-    ikb([...list.map((ch) => [[`${ch.title}`.slice(0, 40), `ch:v:${ch.id}`] as [string, string]]), [["➕ افزودن کانال", "ch:add"]]]));
+  const list = await userChannels(env, uid), rb = !!(await rubikaToken(env));
+  const add: Btn[][] = [[["🟠 افزودن کانال ایتا", "ch:add"]], ...(rb ? [[["🟣 افزودن کانال روبیکا", "rb:add"] as Btn]] : [])];
+  await tg.send(env, uid, list.length ? "<b>📣 کانال‌های شما</b>" : "📭 هنوز کانالی اضافه نکرده‌اید.",
+    ikb([...list.map((ch) => [[`${icon(ch)} ${ch.title}`.slice(0, 40), `ch:v:${ch.id}`] as Btn]), ...add]));
 }
 async function gotChanId(c: Ctx, u: UserRow, text: string): Promise<void> {
   const { env } = c, cid = normalizeChatId(text);
   if (!cid || cid.length < 3 || /\s/.test(cid)) return void (await tg.send(env, u.id, "آیدی یا لینک معتبر نیست. دوباره بفرستید (یا /cancel)."));
-  if ((await userChannels(env, u.id)).some((x) => x.chat_id.toLowerCase() === cid.toLowerCase()))
+  if ((await userChannels(env, u.id)).some((x) => x.platform === "eitaa" && x.chat_id.toLowerCase() === cid.toLowerCase()))
     return void (await tg.send(env, u.id, "این کانال قبلاً اضافه شده است."));
   const info = await eitaa.lookupChat(env, cid);
   if (info.exists === false) return void (await tg.send(env, u.id, "❌ چنین کانالی در ایتا پیدا نشد. آیدی را بررسی کنید (یا /cancel)."));
@@ -125,12 +137,14 @@ async function gotChanTitle(c: Ctx, u: UserRow, d: Record<string, any>, text: st
   if (!text) return;
   await saveChannel(c, u, String(d.chat_id), text.slice(0, 100));
 }
-async function saveChannel(c: Ctx, u: UserRow, chatId: string, title: string): Promise<void> {
+async function saveChannel(c: Ctx, u: UserRow, chatId: string, title: string, platform = "eitaa"): Promise<void> {
   const { env } = c;
   if ((await userChannels(env, u.id)).length >= MAX_CHANNELS) { await clearSession(env, u.id); return void (await tg.send(env, u.id, `حداکثر ${MAX_CHANNELS} کانال مجاز است.`)); }
-  await env.DB.prepare("INSERT INTO channels(user_id,chat_id,title,platform,created_at) VALUES(?,?,?,'eitaa',?)").bind(u.id, chatId, title, now()).run();
+  await env.DB.prepare("INSERT INTO channels(user_id,chat_id,title,platform,created_at) VALUES(?,?,?,?,?)").bind(u.id, chatId, title, platform, now()).run();
   await clearSession(env, u.id);
-  await tg.send(env, u.id, `✅ کانال «${esc(title)}» اضافه شد.\nیادتان باشد حساب ایتایار باید در این کانال ادمین باشد.`, mainKb(isAdmin(env, u.id)));
+  await tg.send(env, u.id, platform === "rubika"
+    ? `✅ کانال روبیکا «${esc(title)}» اضافه شد 🎉\nحالا می‌توانید پست بفرستید.`
+    : `✅ کانال «${esc(title)}» اضافه شد.\n📌 یادتان باشد حساب ایتایار باید در این کانال ادمین باشد.`, mainKb(isAdmin(env, u.id)));
 }
 async function gotRename(c: Ctx, u: UserRow, d: Record<string, any>, text: string): Promise<void> {
   if (!text) return;
@@ -139,18 +153,46 @@ async function gotRename(c: Ctx, u: UserRow, d: Record<string, any>, text: strin
   await tg.send(c.env, u.id, "✅ نام تغییر کرد.", mainKb(isAdmin(c.env, u.id)));
 }
 
+// ------------------------------------------------------------------ rubika
+async function gotRbChan(c: Ctx, u: UserRow, text: string): Promise<void> {
+  const { env } = c, cid = rubika.normalizeRubikaChat(text);
+  if (!cid || cid.length < 3 || /\s/.test(cid)) return void (await tg.send(env, u.id, "❌ آیدی معتبر نیست. دوباره بفرستید (یا /cancel)."));
+  if ((await userChannels(env, u.id)).some((x) => x.platform === "rubika" && x.chat_id === cid)) return void (await tg.send(env, u.id, "این کانال قبلاً اضافه شده است."));
+  if ((await userChannels(env, u.id)).length >= MAX_CHANNELS) { await clearSession(env, u.id); return void (await tg.send(env, u.id, `حداکثر ${MAX_CHANNELS} کانال مجاز است.`)); }
+  const token = await rubikaToken(env);
+  if (!token) { await clearSession(env, u.id); return void (await tg.send(env, u.id, "⏳ اتصال روبیکا هنوز فعال نشده است.")); }
+  await tg.send(env, u.id, "🔎 در حال بررسی دسترسی ربات…");
+  const v = await rubika.verifyChannel(env, token, cid);
+  if (!v.ok) return void (await tg.send(env, u.id, `❌ ${esc(v.reason)}\n\nربات را ادمین کانال کنید و دوباره آیدی را بفرستید (یا /cancel).`));
+  return saveChannel(c, u, cid, v.title || cid, "rubika");
+}
+async function gotRbToken(c: Ctx, u: UserRow, m: TgMessage, text: string): Promise<void> {
+  const { env } = c;
+  await tg.del(env, u.id, m.message_id);
+  const token = text.trim();
+  if (!/^[A-Za-z0-9:_\-]{8,200}$/.test(token)) return void (await tg.send(env, u.id, "❌ قالب توکن درست نیست. دوباره بفرستید (یا /cancel)."));
+  let me: any;
+  try { me = await rubika.getMe(env, token); } catch (e) {
+    return void (await tg.send(env, u.id, `❌ روبیکا توکن را نپذیرفت: ${esc((e as Error).message)}\nدوباره بفرستید (یا /cancel).`));
+  }
+  await saveRubikaToken(env, token);
+  await clearSession(env, u.id);
+  await tg.send(env, u.id, `✅ ربات روبیکا ثبت شد${me?.username ? ` (@${esc(String(me.username))})` : ""} 🎉\nاز حالا کاربران می‌توانند کانال روبیکا وصل کنند.`, mainKb(true));
+}
+
 // ------------------------------------------------------------------ new post
 async function newPost(c: Ctx, u: UserRow): Promise<void> {
   const { env } = c;
-  if (!u.eitaa_token_enc) return void (await tg.send(env, u.id, "ابتدا از «برنامه‌های متصل» توکن ایتایار را ثبت کنید."));
   const list = await userChannels(env, u.id);
-  if (!list.length) return void (await tg.send(env, u.id, "ابتدا از «کانال‌ها» یک کانال اضافه کنید."));
+  if (!list.length) return void (await tg.send(env, u.id, u.eitaa_token_enc ? "ابتدا از «کانال‌ها» یک کانال اضافه کنید." : "ابتدا از «برنامه‌های متصل» توکن ایتایار (یا روبیکا) را وصل و از «کانال‌ها» یک کانال اضافه کنید."));
   if (list.length === 1) return askContent(env, u.id, list[0]);
-  await tg.send(env, u.id, "در کدام کانال؟", ikb(list.map((ch) => [[ch.title.slice(0, 40), `np:c:${ch.id}`] as [string, string]])));
+  await tg.send(env, u.id, "در کدام کانال؟", ikb(list.map((ch) => [[`${icon(ch)} ${ch.title}`.slice(0, 40), `np:c:${ch.id}`] as Btn])));
 }
 async function askContent(env: Env, uid: number, ch: ChannelRow): Promise<void> {
+  if (ch.platform === "rubika") { if (!(await rubikaToken(env))) return void (await tg.send(env, uid, "⏳ اتصال روبیکا فعلاً در دسترس نیست.")); }
+  else if (!(await getUser(env, uid))?.eitaa_token_enc) return void (await tg.send(env, uid, "ابتدا از «برنامه‌های متصل» توکن ایتایار را ثبت کنید."));
   await setSession(env, uid, "np_content", { channel_id: ch.id, silent: 0, pin: 0, view: 0, title: "" });
-  await tg.send(env, uid, `کانال: <b>${esc(ch.title)}</b>\nمتن یا فایل (عکس، ویدیو، سند، صدا؛ تا ۲۰ مگابایت) را بفرستید. لغو: /cancel`);
+  await tg.send(env, uid, `${icon(ch)} کانال: <b>${esc(ch.title)}</b>\n✍️ متن یا فایل (عکس، ویدیو، سند، صدا؛ تا ۲۰ مگابایت) را بفرستید. لغو: /cancel`);
 }
 
 export function extract(m: TgMessage): { kind: "text" | "file"; text: string; file_id: string; file_name: string } | { error: string } {
@@ -176,13 +218,15 @@ async function gotContent(c: Ctx, u: UserRow, d: Record<string, any>, m: TgMessa
 }
 const onoff = (v: number | boolean) => (v ? "روشن" : "خاموش");
 async function showMenu(env: Env, uid: number, d: Record<string, any>, mid?: number): Promise<void> {
-  const ch = await getChannel(env, d.channel_id);
+  const ch = await getChannel(env, d.channel_id), rb = ch?.platform === "rubika";
   const preview = d.kind === "file" ? `📎 ${esc(d.file_name)}${d.text ? "\n" + esc(d.text.slice(0, 300)) : ""}` : esc(String(d.text).slice(0, 400));
-  const t = `<b>پیش‌نمایش</b> (کانال ${esc(ch?.title || "?")})\n\n${preview}${d.title ? `\n\n🏷 عنوان: ${esc(d.title)}` : ""}`;
-  const kb = ikb([[["🚀 ارسال الان", "np:now"], ["⏰ زمان‌بندی", "np:sch"]],
-    [[`🔕 بی‌صدا: ${onoff(d.silent)}`, "np:silent"], [`📌 پین: ${onoff(d.pin)}`, "np:pin"]],
-    [["🏷 عنوان", "np:title"], [`👁 حذف پس از بازدید: ${d.view || "خاموش"}`, "np:view"]], [["❌ لغو", "np:x"]]]);
-  if (mid) await tg.edit(env, uid, mid, t, kb); else await tg.send(env, uid, t, kb);
+  const t = `<b>👀 پیش‌نمایش</b> (${ch ? icon(ch) : ""} ${esc(ch?.title || "?")})\n\n${preview}${d.title ? `\n\n🏷 عنوان: ${esc(d.title)}` : ""}`;
+  const rows: Btn[][] = [[["🚀 ارسال الان", "np:now"], ["⏰ زمان‌بندی", "np:sch"]],
+    rb ? [[`🔕 بی‌صدا: ${onoff(d.silent)}`, "np:silent"], ["🏷 عنوان", "np:title"]]
+       : [[`🔕 بی‌صدا: ${onoff(d.silent)}`, "np:silent"], [`📌 پین: ${onoff(d.pin)}`, "np:pin"]]];
+  if (!rb) rows.push([["🏷 عنوان", "np:title"], [`👁 حذف پس از بازدید: ${d.view || "خاموش"}`, "np:view"]]);
+  rows.push([["❌ لغو", "np:x"]]);
+  if (mid) await tg.edit(env, uid, mid, t, ikb(rows)); else await tg.send(env, uid, t, ikb(rows));
 }
 async function gotNpField(c: Ctx, u: UserRow, d: Record<string, any>, field: "title" | "view", text: string): Promise<void> {
   if (field === "view") {
@@ -217,11 +261,13 @@ async function scheduled(env: Env, uid: number): Promise<void> {
 }
 async function account(env: Env, u: UserRow, admin: boolean): Promise<void> {
   const n = (await userChannels(env, u.id)).length;
-  await tg.send(env, u.id, `<b>حساب من</b>\n\nشناسه: <code>${u.id}</code>\nاشتراک: ${admin ? "مدیر" : u.expires_at && u.expires_at > now() ? "تا " + fmtDt(u.expires_at) : "غیرفعال"}\n` +
-    `توکن ایتایار: ${u.eitaa_token_enc ? "✅" : "❌"}\nکانال‌ها: ${n}`);
+  await tg.send(env, u.id, `<b>👤 حساب من</b>\n\n🆔 شناسه: <code>${u.id}</code>\n💎 اشتراک: ${admin ? "مدیر" : u.expires_at && u.expires_at > now() ? "تا " + fmtDt(u.expires_at) : "غیرفعال"}\n` +
+    `🟠 توکن ایتایار: ${u.eitaa_token_enc ? "✅" : "❌"}\n📣 کانال‌ها: ${n}`);
 }
 async function adminPanel(env: Env, uid: number): Promise<void> {
-  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + "\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code>");
+  const rb = !!(await rubikaToken(env));
+  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + `\n\n🟣 ربات روبیکا: ${rb ? "✅ فعال" : "❌ ثبت نشده"}\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code>`,
+    ikb([[[rb ? "🔑 تغییر توکن ربات روبیکا" : "🔑 ثبت توکن ربات روبیکا", "ad:rb"]], ...(rb && !env.RUBIKA_BOT_TOKEN ? [[["🗑 حذف توکن روبیکا", "ad:rbdel"] as Btn]] : [])]));
 }
 async function adminCmd(env: Env, cmd: string, a: string[]): Promise<string> {
   const id = parseInt(a[0] || "", 10);
@@ -261,8 +307,22 @@ async function onCallback(c: Ctx, q: TgCallback): Promise<void> {
 
   if (kind === "tk") {
     await tg.answer(env, q.id);
-    if (act === "set") { await setSession(env, uid, "token", {}); return void (await tg.send(env, uid, "🔑 توکن ایتایار را بفرستید (پیام شما بعد از خواندن پاک می‌شود). لغو: /cancel")); }
+    if (act === "set") { await setSession(env, uid, "token", {}); return void (await tg.send(env, uid, "🔑 توکن ایتایار را بفرستید\n🧹 پیام شما بعد از خواندن پاک می‌شود. لغو: /cancel")); }
     if (act === "del") { await env.DB.prepare("UPDATE users SET eitaa_token_enc='', eitaa_account='' WHERE id=?").bind(uid).run(); return void (await tg.send(env, uid, "🗑 توکن حذف شد.")); }
+  }
+  if (kind === "rb" && act === "add") {
+    await tg.answer(env, q.id);
+    const t = await rubikaToken(env);
+    if (!t) return void (await tg.send(env, uid, "⏳ اتصال روبیکا هنوز فعال نشده است."));
+    let uname = "";
+    try { uname = String((await rubika.getMe(env, t))?.username || ""); } catch { /* guide still works */ }
+    await setSession(env, uid, "rb_chan", {});
+    return void (await tg.send(env, uid, `<b>🟣 اتصال کانال روبیکا</b>\n\n1️⃣ ربات ${uname ? "@" + esc(uname) : "مادیر"} را به کانال خود اضافه کنید\n2️⃣ آن را «ادمین» کنید (با اجازه‌ی ارسال پیام)\n3️⃣ آیدی کانال را همین‌جا بفرستید\n\nلغو: /cancel`));
+  }
+  if (kind === "ad" && admin) {
+    await tg.answer(env, q.id);
+    if (act === "rb") { await setSession(env, uid, "rb_token", {}); return void (await tg.send(env, uid, "🔑 توکن ربات روبیکا را بفرستید\n🧹 پیام شما بعد از خواندن پاک می‌شود. لغو: /cancel")); }
+    if (act === "rbdel") { await clearRubikaToken(env); return void (await tg.send(env, uid, "🗑 توکن روبیکا حذف شد.")); }
   }
   if (kind === "ch") {
     await tg.answer(env, q.id);
