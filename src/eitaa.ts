@@ -48,7 +48,11 @@ export function sendFile(env: Env, token: string, chatId: string, name: string, 
   const f = new FormData();
   f.set("chat_id", chatId); if (caption) f.set("caption", caption); opts(f, o);
   f.set("file", new Blob([bytes.slice().buffer as ArrayBuffer]), name);
-  return call(env, token, "sendFile", f);
+  // the docs list "sendDocument" in the method index and "sendFile" in the section title: try sendFile, fall back to sendDocument
+  return call(env, token, "sendFile", f).catch((e) => {
+    if (e instanceof EitaaNetworkError || !/method|not\s*found|unknown|invalid/i.test((e as Error).message)) throw e;
+    return call(env, token, "sendDocument", f);
+  });
 }
 
 // ---- public page lookup (best effort; Eitaayar has no getChat)

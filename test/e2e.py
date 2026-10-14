@@ -1,4 +1,4 @@
-import json, subprocess, time, httpx
+import datetime, json, subprocess, time, httpx, jdatetime
 
 W, M, SEC = "http://localhost:8787", "http://127.0.0.1:9999", "whsecret123"
 ADMIN, USER, OTHER = 1, 2, 3
@@ -25,7 +25,6 @@ def cb(user, data, mid=50):
 def log(): return c.get(f"{M}/_log").json()
 def clear(): c.post(f"{M}/_clear")
 def sent_to(user): return [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == user]
-def rb_calls(m): return [e for e in log() if e["svc"] == "rubika" and e["method"] == m]
 def eitaa_calls(m): return [e for e in log() if e["svc"] == "eitaa" and e["method"] == m]
 def d1(sql): return subprocess.run(["npx", "wrangler", "d1", "execute", "medyas-db", "--local", "--command", sql], capture_output=True, text=True).stdout
 def settle(): time.sleep(1.5)
@@ -121,39 +120,125 @@ msg(ADMIN, "/unban 2"); clear(); msg(ADMIN, "/stats"); settle()
 check("admin stats", any("کاربران" in t for t in sent_to(ADMIN)))
 # ---------------- website
 r = c.get(f"{W}/")
-check("site home is served", r.status_code == 200 and "text/html" in r.headers["content-type"] and "مدیاس" in r.text and "روبیکا" in r.text)
+check("site home is served", r.status_code == 200 and "text/html" in r.headers["content-type"] and "مدیاس" in r.text and "روبیکا" not in r.text and "ایجنت" in r.text)
 check("unknown page still 404", c.get(f"{W}/nope").status_code == 404)
 
-# ---------------- Rubika: only the admin can set the platform bot token; users need it to connect
-clear(); msg(USER, "📣 کانال‌ها"); settle()
-check("rubika button hidden until the admin sets a token", not any("روبیکا" in str(e["body"].get("reply_markup", "")) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage"))
-clear(); cb(USER, "ad:rb"); msg(USER, "rbtoken_ABC12345"); settle()
-check("non-admin cannot set the rubika token", not rb_calls("getMe"))
-clear(); msg(ADMIN, "🛠 مدیریت"); cb(ADMIN, "ad:rb"); msg(ADMIN, "badrb_token1234"); settle()
-check("bad rubika token rejected and not echoed", any("نپذیرفت" in t and "badrb_token1234" not in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
-clear(); cb(ADMIN, "ad:rb"); msg(ADMIN, "rbtoken_ABC12345"); settle()
-check("good rubika token stored", any("ربات روبیکا ثبت شد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
-check("rubika token encrypted at rest", "rbtoken_ABC" not in d1("SELECT value FROM settings WHERE key='rubika_token_enc'"))
 
-# ---------------- Rubika: connect a channel only when the bot can post there
-clear(); cb(USER, "rb:add"); msg(USER, "cNOADMIN0000000000000001"); settle()
-check("bot not admin -> channel refused", any("ادمین" in t and "❌" in t for t in sent_to(USER)), str(sent_to(USER)))
-clear(); msg(USER, "cGHOST0000000000000001"); settle()
-check("unknown rubika channel refused", any("❌" in t for t in sent_to(USER)))
-clear(); msg(USER, "https://rubika.ir/mychannel"); settle()
-check("username/link explained (rubika needs the internal id) with a find button", any("rb:find" in str(e["body"].get("reply_markup", "")) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage"))
-clear(); cb(USER, "rb:find"); settle()
-check("auto-discovery lists only channels (not the user's private chat)", any("rb:pk:cCHAN0000000000000001" in str(e["body"].get("reply_markup", "")) and "b0USERCHAT" not in str(e["body"].get("reply_markup", "")) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage"), str(log()[-3:]))
-clear(); cb(USER, "rb:pk:cCHAN0000000000000001"); settle()
-check("rubika channel connected via discovery", any("کانال روبیکا" in t and "اضافه شد" in t for t in sent_to(USER)), str(sent_to(USER)))
-check("probe message was cleaned up", len(rb_calls("deleteMessage")) >= 1)
-clear(); cb(USER, "rb:add"); msg(USER, "https://rubika.ir/cCHAN0000000000000001"); settle()
-check("duplicate rubika channel refused", any("قبلاً" in t for t in sent_to(USER)))
+# ======================================================================= AGENT
+def d1j(sql):
+    out = subprocess.run(["npx", "wrangler", "d1", "execute", "medyas-db", "--local", "--json", "--command", sql], capture_output=True, text=True).stdout
+    return json.loads(out)[0]["results"]
+def tick(n=1):
+    for _ in range(n):
+        c.get(f"{W}/__scheduled"); time.sleep(4)
+def setpage(name, posts): c.post(f"{M}/_page/{name}", json=posts)
+def buttons(user):
+    return " ".join(json.dumps(e["body"].get("reply_markup", ""), ensure_ascii=False) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == user)
+FA = "۰۱۲۳۴۵۶۷۸۹"; MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
+tnow = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3, minutes=30)
+jd = jdatetime.date.fromgregorian(date=tnow.date())
+fa = lambda n: str(n).translate(str.maketrans("0123456789", FA))
+TODAY = f"{fa(jd.day)} {MONTHS[jd.month - 1]} {fa(jd.year)}"
+YEST = f"{fa((jd - jdatetime.timedelta(days=1)).day)} {MONTHS[(jd - jdatetime.timedelta(days=1)).month - 1]} {fa((jd - jdatetime.timedelta(days=1)).year)}"
+ISO = tnow.strftime("%Y-%m-%dT%H:%M:%S+03:30")
+OLD_MORNING = {"id": 10, "ts": ISO, "text": f"🌞 صبح بخیر\n{YEST}\n\n📢 عضویت در کانال\n🆔 @goodmorning_ch", "image": None}
+NEW_MORNING = {"id": 11, "ts": ISO, "text": f"🌞 صبح بخیر\n{TODAY}\nروزتان پر از انرژی\n\n📢 عضویت در کانال ما\n🆔 @goodmorning_ch", "image": f"{M}/img/m11.jpg"}
+def job_id(): return d1j("SELECT id FROM agent_jobs ORDER BY id DESC LIMIT 1")[0]["id"]
 
-# ---------------- Rubika: delivery (text, title prefix, silent) through the same pipeline
-rid = d1("SELECT id FROM channels WHERE platform='rubika'").split('"id": ')[1].split()[0].strip(",}")
-clear(); msg(USER, "✍️ پست جدید"); cb(USER, f"np:c:{rid}"); msg(USER, "سلام روبیکا"); cb(USER, "np:silent"); cb(USER, "np:now"); time.sleep(3)
-rs = [e for e in rb_calls("sendMessage") if e["body"].get("text") == "سلام روبیکا"]
-check("post delivered to rubika", len(rs) == 1 and rs[0]["body"]["chat_id"] == "cCHAN0000000000000001" and rs[0]["body"].get("disable_notification") is True, str(rb_calls("sendMessage")))
-check("eitaa untouched by a rubika post", not eitaa_calls("sendMessage"))
+# ---------------- the agent needs the admin's LLM key first
+clear(); msg(USER, "🤖 ایجنت هوشمند"); settle()
+check("agents inactive until the admin saves an LLM key", any("هنوز فعال نشده" in t for t in sent_to(USER)), str(sent_to(USER)))
+clear(); msg(ADMIN, "🛠 مدیریت"); cb(ADMIN, "ad:llm"); msg(ADMIN, "testkey_LLM123"); settle()
+check("LLM key saved, message deleted, key not echoed", any("کلید هوش مصنوعی ثبت شد" in t for t in sent_to(ADMIN)) and any(e["method"] == "deleteMessage" for e in log()))
+check("LLM key encrypted at rest", "testkey_LLM123" not in d1("SELECT value FROM settings WHERE key='llm_key_enc'"))
+
+# ---------------- create a free-text "good morning" agent
+setpage("goodmorning_ch", [OLD_MORNING, NEW_MORNING])
+clear(); msg(USER, "🤖 ایجنت هوشمند"); cb(USER, "ag:new"); settle()
+check("asks for the free-text task", any("به ایجنت بگویید" in t for t in sent_to(USER)), str(sent_to(USER)))
+msg(USER, "هر روز ساعت ۷ صبح از کانال @goodmorning_ch پیام صبح بخیر امروز را که تاریخ امروز دارد در کانالم بگذار"); settle()
+check("asks for the signature", any("امضای ثابت" in t for t in sent_to(USER)))
+clear(); msg(USER, "🆔 @mychan | کانال تست"); settle()
+check("plan confirmation with the schedule parsed by the LLM", "ag:mk" in buttons(USER) and any("07:00" in t for t in sent_to(USER)), str(sent_to(USER)))
+clear(); cb(USER, "ag:mk"); settle()
+J1 = job_id(); row = d1j(f"SELECT * FROM agent_jobs WHERE id={J1}")[0]
+check("job stored with schedule + signature, no backlog", row["times"] == '["07:00"]' and row["footer"] == "🆔 @mychan | کانال تست" and row["last_key"] != "", str(row))
+
+# ---------------- run now: copies today's post (with its image), strips the source signature, adds mine
+clear(); cb(USER, f"ag:run:{J1}"); tick(2)
+ef = eitaa_calls("sendFile")
+check("agent published today's post with its image", len(ef) == 1 and ef[0]["form"]["file"]["filename"] == "image.jpg" and ef[0]["form"]["file"]["size"] > 2000, str(ef))
+cap = ef[0]["form"]["caption"] if ef else ""
+check("caption has today's date and my signature", TODAY in cap and cap.endswith("🆔 @mychan | کانال تست"), cap)
+check("source signature removed", "@goodmorning_ch" not in cap and "عضویت" not in cap and YEST not in cap, cap)
+check("owner got the run report", any("🤖" in t or "ارسال شد" in t for t in sent_to(USER)))
+
+# ---------------- daily slot: today's post is NOT there yet -> retry later; then it appears
+setpage("goodmorning_ch", [OLD_MORNING])
+slot = (tnow - datetime.timedelta(minutes=1)).strftime("%H:%M")
+d1(f"UPDATE agent_jobs SET times='[\"{slot}\"]', last_key='2000-01-01 00:00', attempts=0, retry_at=NULL, run_now=0 WHERE id={J1}")
+d1("DELETE FROM agent_seen")
+clear(); tick(1)
+row = d1j(f"SELECT * FROM agent_jobs WHERE id={J1}")[0]
+check("yesterday's poster is rejected and a retry is scheduled", not eitaa_calls("sendFile") and not eitaa_calls("sendMessage") and row["retry_at"] and row["attempts"] == 1 and row["last_key"] == "2000-01-01 00:00", str(row))
+setpage("goodmorning_ch", [OLD_MORNING, {**NEW_MORNING, "id": 12, "image": None}])
+d1(f"UPDATE agent_jobs SET retry_at=0 WHERE id={J1}")
+clear(); tick(2)
+em = eitaa_calls("sendMessage")
+row = d1j(f"SELECT * FROM agent_jobs WHERE id={J1}")[0]
+check("retry found today's post and published it as text", len(em) == 1 and TODAY in em[0]["form"]["text"] and "@goodmorning_ch" not in em[0]["form"]["text"], str(em))
+check("slot closed after success", row["attempts"] == 0 and row["retry_at"] is None and row["last_key"] > "2000", str(row))
+clear(); tick(1)
+check("slot is not run twice", not eitaa_calls("sendMessage") and not eitaa_calls("sendFile"))
+
+# ---------------- last attempt: nothing found for 2+ hours -> the agent writes the post itself
+if tnow.hour >= 3:
+    setpage("goodmorning_ch", [OLD_MORNING])
+    old = (tnow - datetime.timedelta(minutes=150)).strftime("%H:%M")
+    d1(f"UPDATE agent_jobs SET times='[\"{old}\"]', last_key='2000-01-01 00:00', attempts=1, retry_at=0 WHERE id={J1}")
+    clear(); tick(2)
+    em = eitaa_calls("sendMessage")
+    check("fallback post with today's date after the retry window", len(em) == 1 and em[0]["form"]["text"].startswith("🌞 صبح بخیر") and TODAY in em[0]["form"]["text"], str(em))
+d1(f"UPDATE agent_jobs SET enabled=0 WHERE id={J1}")
+
+# ---------------- curate from several public channels
+def sp(i, t): return {"id": i, "ts": ISO, "text": t, "image": None}
+setpage("sport_ch", [sp(20, "فوتبال: نتایج هفته‌ی ایران\n\n📢 @sport_ch"), sp(21, "تبلیغ ویژه! خرید ارزان لوازم ورزش\n@sport_ch"),
+                     sp(22, "ورزش صبحگاهی برای قلب سالم‌تر\n\nعضو شوید 👈 @sport_ch"), sp(23, "ورزش مفید برای کمردرد\n🆔 @sport_ch")])
+clear(); cb(USER, "ag:new"); msg(USER, "روزی سه بار ساعت ۹ و ۱۴ از کانال @sport_ch دو مطلب درباره‌ی ورزش بیاور، تبلیغ نباشد"); msg(USER, "🆔 @mychan"); cb(USER, "ag:mk"); settle()
+J2 = job_id()
+check("planner extracted two daily times", d1j(f"SELECT times FROM agent_jobs WHERE id={J2}")[0]["times"] == '["09:00","14:00"]')
+clear(); cb(USER, f"ag:run:{J2}"); tick(1)
+rows = d1j(f"SELECT text, run_at, created_at, status FROM posts WHERE job_id={J2} ORDER BY id")
+check("two posts created, ad skipped, second one spread by 20 min",
+      len(rows) == 2 and all("تبلیغ" not in r["text"] and "@sport_ch" not in r["text"] and r["text"].endswith("🆔 @mychan") for r in rows)
+      and 1100 < rows[1]["run_at"] - rows[0]["run_at"] < 1300, str(rows))
+tick(1)
+check("only the first (due) post was sent now", len([e for e in eitaa_calls("sendMessage") if "🆔 @mychan" in e["form"]["text"]]) == 1)
+clear(); cb(USER, f"ag:run:{J2}"); tick(1)
+rows = d1j(f"SELECT text FROM posts WHERE job_id={J2} ORDER BY id")
+check("second run brings only unused content", len(rows) == 3 and "فوتبال" in rows[2]["text"], str(rows))
+clear(); cb(USER, f"ag:run:{J2}"); tick(1)
+check("third run: nothing new -> owner told why, no new post", len(d1j(f"SELECT id FROM posts WHERE job_id={J2}")) == 3 and any("مناسب" in t for t in sent_to(USER)), str(sent_to(USER)))
+
+# ---------------- manual approval mode
+cb(USER, f"ag:ap:{J2}"); d1("DELETE FROM agent_seen"); d1(f"UPDATE posts SET run_at=run_at-7200 WHERE job_id={J2}")
+clear(); cb(USER, f"ag:run:{J2}"); tick(1)
+drafts = d1j(f"SELECT id FROM posts WHERE job_id={J2} AND status='draft'")
+check("approval mode: drafts waiting + approve buttons sent", len(drafts) >= 1 and "ag:go:" in buttons(USER), str(drafts))
+clear(); cb(USER, f"ag:go:{drafts[0]['id']}"); settle(); tick(1)
+check("approved draft is published", "sent" in d1(f"SELECT status FROM posts WHERE id={drafts[0]['id']}"))
+if len(drafts) > 1:
+    cb(USER, f"ag:no:{drafts[1]['id']}"); settle()
+    check("rejected draft is canceled", "canceled" in d1(f"SELECT status FROM posts WHERE id={drafts[1]['id']}"))
+
+# ---------------- isolation + cleanup
+clear(); cb(OTHER, f"ag:tg:{J2}"); settle()
+check("another user cannot touch my agent", d1j(f"SELECT enabled FROM agent_jobs WHERE id={J2}")[0]["enabled"] == 1)
+cid = d1j("SELECT id FROM channels WHERE user_id=2")[0]["id"]
+cb(USER, f"ch:dy:{cid}"); settle()
+check("deleting the channel deletes its agents", not d1j("SELECT id FROM agent_jobs"))
+
+clear(); msg(ADMIN, "/src goodmorning_ch"); msg(ADMIN, "/src nochannel_x"); settle()
+check("/src diagnostics for admins", any("پیام‌های شناسایی‌شده: 1" in t for t in sent_to(ADMIN)) and any("پیامی در آن شناسایی نشد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
 print("ALL E2E CHECKS PASSED")

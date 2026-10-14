@@ -3,7 +3,7 @@ import { Env, tgBase } from "./env";
 
 // ---- edit these to brand / price the product ----
 const BRAND = "مدیاس";
-const TAGLINE = "پست فوری و زمان‌بندی‌شده در ایتا و روبیکا";
+const TAGLINE = "پست فوری، زمان‌بندی‌شده و ایجنت هوشمند برای ایتا";
 const PLANS: { name: string; period: string; price: string; note: string; hot?: boolean }[] = [
   { name: "ماهانه", period: "۳۰ روز", price: "تماس با پشتیبانی", note: "شروع بدون تعهد" },
   { name: "سه‌ماهه", period: "۹۰ روز", price: "تماس با پشتیبانی", note: "پیشنهاد ما", hot: true },
@@ -28,13 +28,13 @@ const FEATURES = [
   ["⚡️", "ارسال فوری", "متن، عکس، ویدیو، سند و صدا را با یک دکمه در کانال منتشر کنید."],
   ["⏰", "زمان‌بندی دقیق", "به وقت تهران و با تاریخ شمسی؛ مثل «فردا ۰۹:۰۰» یا «+۴۵»."],
   ["🟠", "کانال‌های ایتا", "اتصال با توکن ایتایار؛ بی‌صدا، پین، عنوان و حذف پس از بازدید."],
-  ["🟣", "کانال‌های روبیکا", "ربات را ادمین کانال کنید و آیدی را بدهید؛ همین."],
+  ["🤖", "ایجنت هوشمند", "با زبان ساده بگویید چه کاری و چه ساعتی؛ ایجنت از کانال‌های عمومی محتوا می‌آورد یا خودش می‌نویسد."],
   ["🔐", "امن", "توکن‌ها رمزنگاری‌شده (AES‑GCM) ذخیره می‌شوند و پیام حاوی توکن پاک می‌شود."],
-  ["🤖", "بدون نصب", "همه‌چیز داخل تلگرام است؛ نه اپ لازم است و نه سرور."],
+  ["📲", "بدون نصب", "همه‌چیز داخل تلگرام است؛ نه اپ لازم است و نه سرور."],
 ];
 const STEPS = [
   ["۱", "ربات را باز کنید", "در تلگرام /start بزنید و اشتراک را فعال کنید."],
-  ["۲", "کانال را وصل کنید", "از «برنامه‌های متصل» ایتا یا روبیکا را انتخاب کنید."],
+  ["۲", "کانال را وصل کنید", "از «برنامه‌های متصل» توکن ایتایار را ثبت کنید."],
   ["۳", "پست بفرستید", "متن یا فایل را بدهید؛ ارسال الان یا زمان‌بندی."],
 ];
 const FAQ = [
@@ -82,11 +82,11 @@ function page(botUser: string): string {
   const cards = (rows: string[][]) => rows.map(([i, t, d]) => `<div class="card"><div class="ic">${i}</div><h3>${t}</h3><p>${d}</p></div>`).join("");
   return `<!doctype html><html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${BRAND} | ${TAGLINE}</title><meta name="description" content="${TAGLINE}. ربات تلگرام برای مدیریت کانال‌های ایتا و روبیکا.">
+<title>${BRAND} | ${TAGLINE}</title><meta name="description" content="${TAGLINE}. ربات تلگرام برای مدیریت کانال‌های ایتا.">
 <meta name="theme-color" content="#4f46e5"><link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9A%80%3C/text%3E%3C/svg%3E">
 <style>${CSS}</style></head><body><div class="w">
 <nav><a class="logo" href="/">🚀 ${BRAND}<b>.</b></a><a class="btn" href="${link}">شروع در تلگرام</a></nav>
-<header class="hero"><div class="pills"><span class="pill">🟠 ایتا</span><span class="pill">🟣 روبیکا</span><span class="pill">✈️ تلگرام</span></div>
+<header class="hero"><div class="pills"><span class="pill">🟠 ایتا</span><span class="pill">🤖 ایجنت</span><span class="pill">✈️ تلگرام</span></div>
 <h1>${TAGLINE}</h1><p>از همین‌جا کانال‌هایتان را مدیریت کنید. بدون نصب، بدون سرور، فقط یک ربات تلگرام.</p>
 <div class="row"><a class="btn" href="${link}">✨ شروع کنید</a><a class="btn o" href="#plans">💎 پلن‌ها</a></div></header>
 <section><h2>قابلیت‌ها</h2><p class="sub">هرچه برای انتشار منظم لازم دارید.</p><div class="g g3">${cards(FEATURES)}</div></section>

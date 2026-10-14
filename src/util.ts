@@ -134,3 +134,49 @@ export function normalizeChatId(raw: string): string {
 
 export const b64 = (u: Uint8Array): string => btoa(String.fromCharCode(...u));
 export const unb64 = (s: string): Uint8Array => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+
+// ---- Persian date text (used by the agent: "morning" messages and date matching)
+export const JALALI_MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"];
+export const WEEKDAYS = ["یکشنبه", "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه"]; // index = JS getUTCDay()
+export const toFa = (s: string | number): string => String(s).replace(/\d/g, (d) => "۰۱۲۳۴۵۶۷۸۹"[+d]);
+export const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/** "شنبه ۲۳ مهر ۱۴۰۵" for the given moment (Tehran time). */
+export function jalaliLong(epoch: number): string {
+  const l = toLocal(epoch), j = toJalali(l.y, l.mo, l.d);
+  const wd = WEEKDAYS[new Date(Date.UTC(l.y, l.mo - 1, l.d)).getUTCDay()];
+  return `${wd} ${toFa(j.jd)} ${JALALI_MONTHS[j.jm - 1]} ${toFa(j.jy)}`;
+}
+/** Tehran calendar day + clock as a sortable key: "2026-10-14 07:00". */
+export function slotKey(epoch: number): string {
+  const l = toLocal(epoch);
+  return `${l.y}-${pad2(l.mo)}-${pad2(l.d)} ${pad2(l.h)}:${pad2(l.mi)}`;
+}
+/** Epoch of "HH:MM" on the Tehran calendar day that contains `epoch`. */
+export function atTime(epoch: number, hhmm: string): number {
+  const [h, mi] = hhmm.split(":").map((x) => parseInt(x, 10));
+  return fromLocal({ ...toLocal(epoch), h, mi });
+}
+
+/** Does `text` mention the calendar day of `epoch`? (Jalali "۲۳ مهر" / "1405/07/23", or Gregorian "2026/10/15" / "15 October") */
+export function mentionsDay(text: string, epoch: number): boolean {
+  const t = normDigits(text).replace(/[‌‏‎]/g, " ").replace(/\s+/g, " ");
+  const l = toLocal(epoch), j = toJalali(l.y, l.mo, l.d);
+  const sep = "[/\\-.]", p = (n: number) => `0?${n}`;
+  const num = new RegExp(`(?:^|\\D)(?:${j.jy}${sep}${p(j.jm)}${sep}${p(j.jd)}|${p(j.jd)}${sep}${p(j.jm)}${sep}${j.jy}|${l.y}${sep}${p(l.mo)}${sep}${p(l.d)}|${p(l.d)}${sep}${p(l.mo)}${sep}${l.y})(?:\\D|$)`);
+  if (num.test(t)) return true;
+  const name = new RegExp(`(?:^|\\D)${p(j.jd)} ?${JALALI_MONTHS[j.jm - 1]}(?:\\s|$|\\D)`);
+  return name.test(t);
+}
+/** Any explicit full date (yyyy/mm/dd) that is NOT today? Used to reject yesterday's "good morning" posters. */
+export function mentionsOtherDate(text: string, epoch: number): boolean {
+  const t = normDigits(text);
+  const re = /(?:^|\D)(1[34]\d{2}|20\d{2})[/\-.](\d{1,2})[/\-.](\d{1,2})(?:\D|$)/g;
+  let m: RegExpExecArray | null, any = false;
+  while ((m = re.exec(t))) {
+    any = true;
+    const probe = `${m[1]}/${m[2]}/${m[3]}`;
+    if (mentionsDay(probe, epoch)) return false;
+  }
+  return any;
+}

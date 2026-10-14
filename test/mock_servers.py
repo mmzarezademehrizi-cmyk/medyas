@@ -1,8 +1,9 @@
-"""Fake Telegram + Eitaayar + eitaa.com on one port; records every call so tests can assert on them."""
-import json
+"""Fake Telegram + Eitayar + eitaa.com (public channel pages) + an LLM (scripted tool-calling) on one port; records every call."""
+import html, json, re
 from aiohttp import web
 
 LOG, MID = [], [1000]
+PAGES = {}   # channel name -> list of {"id", "text", "ts", "image"}
 
 
 async def tg(req):
@@ -36,32 +37,88 @@ async def eitaa(req):
     return web.json_response({"ok": True, "result": {"message_id": 777}})
 
 
-async def rubika(req):
-    m, tok = req.match_info["method"], req.match_info["token"]
-    body = await req.json() if req.can_read_body else {}
-    LOG.append({"svc": "rubika", "method": m, "token": tok, "body": body})
-    if tok.startswith("badrb"):
-        return web.json_response({"status": "INVALID_ACCESS", "status_det": f"invalid token {tok}"})
-    cid = body.get("chat_id", "")
-    if m == "getMe":
-        return web.json_response({"status": "OK", "data": {"bot": {"username": "medyas_rb_bot"}}})
-    if m == "getChat":
-        if "GHOST" in cid:
-            return web.json_response({"status": "INVALID_INPUT", "status_det": "chat not found"})
-        return web.json_response({"status": "OK", "data": {"chat": {"chat_id": cid, "chat_type": "User" if cid.startswith("b0") else "Channel", "title": "کانال روبیکا"}}})
-    if m == "getUpdates":
-        return web.json_response({"status": "OK", "data": {"updates": [{"type": "NewMessage", "chat_id": "cCHAN0000000000000001"}, {"type": "NewMessage", "chat_id": "b0USERCHAT000000000001"}], "next_offset_id": ""}})
-    if m == "sendMessage":
-        if "NOADMIN" in cid:
-            return web.json_response({"status": "INVALID_ACCESS", "status_det": "bot is not admin"})
-        return web.json_response({"status": "OK", "data": {"message_id": "rb1"}})
-    return web.json_response({"status": "OK", "data": {}})
+def render(name):
+    out = ['<html><head><meta property="og:title" content="کانال %s - Eitaa"></head><body><div class="tgme_widget_message_history">' % name]
+    for p in PAGES.get(name, []):
+        photo = ('<a class="tgme_widget_message_photo_wrap" href="x" style="width:453px;background-image:url(\'%s\')"></a>' % p["image"]) if p.get("image") else ""
+        text = html.escape(p["text"]).replace("\n", "<br/>")
+        out.append('<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="%s/%s">%s'
+                   '<div class="tgme_widget_message_text js-message_text" dir="auto">%s</div><div class="tgme_widget_message_footer"><a class="tgme_widget_message_date" href="x"><time datetime="%s" class="time">12:00</time></a></div></div></div>'
+                   % (name, p["id"], photo, text, p["ts"]))
+    out.append("</div></body></html>")
+    return "".join(out)
 
 
 async def page(req):
-    if req.match_info["name"] == "ghost":
+    name = req.match_info["name"]
+    if name == "ghost":
         return web.Response(status=404)
+    if name in PAGES:
+        return web.Response(text=render(name), content_type="text/html")
     return web.Response(text='<html><head><meta property="og:title" content="کانال من - Eitaa"></head><body>۱۲۰ مشترک</body></html>', content_type="text/html")
+
+
+async def setpage(req):
+    PAGES[req.match_info["name"]] = await req.json()
+    return web.Response(text="ok")
+
+
+async def img(req):
+    return web.Response(body=b"\xff\xd8\xff" + b"I" * 3000, content_type="image/jpeg")
+
+
+# ------------------------------------------------------------------ scripted LLM (OpenAI-compatible chat/completions)
+def tool_call(i, name, args):
+    return {"id": f"call{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+
+def reply(content=None, calls=None):
+    msg = {"role": "assistant", "content": content}
+    if calls:
+        msg["tool_calls"] = calls
+    return web.json_response({"choices": [{"message": msg}]})
+
+
+async def llm(req):
+    body = await req.json()
+    if req.headers.get("authorization") != "Bearer testkey_LLM123":
+        return web.json_response({"error": "bad key"}, status=401)
+    msgs, tools = body["messages"], body.get("tools")
+    system = msgs[0]["content"]
+    LOG.append({"svc": "llm", "tools": bool(tools), "n": len(msgs)})
+    if not tools:      # planner
+        instr = msgs[-1]["content"]
+        times = ["07:00"] if ("۷" in instr or "7" in instr) else (["09:00", "14:00"] if "۹ و ۱۴" in instr else [])
+        return reply(json.dumps({"name": "ایجنت تست", "times": times, "days": None, "once": None, "summary": "خلاصه‌ی تست"}, ensure_ascii=False))
+    # --- agent loop: decide the next step from what has been called already
+    names = {c["id"]: c["function"]["name"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
+    results = {names[m["tool_call_id"]]: json.loads(m["content"]) for m in msgs if m["role"] == "tool"}
+    called = list(names.values())
+    task = system.split('"""')[1]
+    can_retry = any(t["function"]["name"] == "retry_later" for t in tools)
+    if "صبح" in task:
+        if not called:
+            return reply(calls=[tool_call(1, "get_current_time", {}), tool_call(2, "read_channel", {"channel": "goodmorning_ch"})])
+        if "post_to_channel" not in called and "retry_later" not in called:
+            jal = results["get_current_time"]["jalali"].split(" ", 1)[1]          # "۲۳ مهر ۱۴۰۵" without the weekday
+            hit = [p for p in results["read_channel"].get("posts", []) if "صبح بخیر" in p["text"] and jal in p["text"] and not p["used"]]
+            if hit:
+                p = hit[0]
+                return reply(calls=[tool_call(3, "post_to_channel", {"text": p["text"], "image_ref": p["ref"] if p["has_image"] else None, "source_refs": [p["ref"]]})])
+            if can_retry:
+                return reply(calls=[tool_call(3, "retry_later", {"minutes": 10, "reason": "پست امروز هنوز نیامده"})])
+            return reply(calls=[tool_call(3, "post_to_channel", {"text": "🌞 صبح بخیر\n" + results["get_current_time"]["jalali"]})])
+        return reply(calls=[tool_call(4, "finish", {"summary": "پیام صبح بخیر امروز منتشر شد."})])
+    if "ورزش" in task:
+        if not called:
+            return reply(calls=[tool_call(1, "read_channel", {"channel": "sport_ch"})])
+        if "post_to_channel" not in called:
+            good = [p for p in results["read_channel"]["posts"] if ("فوتبال" in p["text"] or "ورزش" in p["text"]) and "تبلیغ" not in p["text"] and not p["used"]][:2]
+            if not good:
+                return reply(calls=[tool_call(5, "finish", {"summary": "مطلب مناسب جدیدی نبود."})])
+            return reply(calls=[tool_call(10 + i, "post_to_channel", {"text": p["text"], "source_refs": [p["ref"]], "delay_minutes": 20 * i}) for i, p in enumerate(good)])
+        return reply(calls=[tool_call(6, "finish", {"summary": "مطالب ورزشی منتشر شد."})])
+    return reply(content="کاری برای انجام نبود.")
 
 
 async def log(req):
@@ -74,6 +131,8 @@ async def clear(req):
 
 app = web.Application()
 app.add_routes([web.post("/bot{token}/{method}", tg), web.get("/file/bot{token}/{path:.*}", tgfile),
-                web.post("/api/{token}/{method}", eitaa), web.post("/rubika/{token}/{method}", rubika), web.get("/_log", log), web.post("/_clear", clear), web.get("/{name}", page)])
+                web.post("/api/bot{token}/{method}", eitaa), web.post("/llm/chat/completions", llm),
+                web.get("/_log", log), web.post("/_clear", clear), web.post("/_page/{name}", setpage),
+                web.get("/img/{f}", img), web.get("/s/{name}", page), web.get("/{name}", page)])
 if __name__ == "__main__":
     web.run_app(app, port=9999, print=None)
