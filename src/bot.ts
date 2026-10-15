@@ -4,6 +4,7 @@ import * as eitaa from "./eitaa";
 import { Env, adminIds } from "./env";
 import * as adminAi from "./adminai";
 import * as agentUi from "./agentui";
+import * as chat from "./chat";
 import { llmChain } from "./providers";
 import { cleanText, fetchChannel } from "./source";
 import { deliver } from "./scheduler";
@@ -11,14 +12,14 @@ import * as tg from "./tg";
 import { Btn, Kb, TgCallback, TgMessage, TgUpdate, ikb } from "./tg";
 import { esc, fmtDt, normalizeChatId, parseWhen } from "./util";
 
-export const B = { NEW: "✍️ پست جدید", SCHED: "⏰ زمان‌بندی‌شده‌ها", AGENT: "🤖 ایجنت هوشمند", CHAN: "📣 کانال‌ها", APPS: "🔌 برنامه‌های متصل", ME: "👤 حساب من", HELP: "💡 راهنما", ADMIN: "🛠 مدیریت" };
+export const B = { NEW: "✍️ پست جدید", SCHED: "⏰ زمان‌بندی‌شده‌ها", AGENT: "🤖 ایجنت هوشمند", CHAT: "💬 گفتگو با ایجنت", CHAN: "📣 کانال‌ها", APPS: "🔌 برنامه‌های متصل", ME: "👤 حساب من", HELP: "💡 راهنما", ADMIN: "🛠 مدیریت" };
 const MENU = new Set(Object.values(B));
 const MAX_FILE = 20 * 1024 * 1024;
 const MAX_CHANNELS = 20;
 type Ctx = { env: Env; wait: (p: Promise<unknown>) => void };
 
 const mainKb = (admin: boolean) => ({
-  keyboard: [[{ text: B.NEW }, { text: B.SCHED }], [{ text: B.AGENT }, { text: B.CHAN }], [{ text: B.APPS }, { text: B.ME }], [{ text: B.HELP }], ...(admin ? [[{ text: B.ADMIN }]] : [])],
+  keyboard: [[{ text: B.NEW }, { text: B.SCHED }], [{ text: B.CHAT }, { text: B.AGENT }], [{ text: B.CHAN }, { text: B.APPS }], [{ text: B.ME }, { text: B.HELP }], ...(admin ? [[{ text: B.ADMIN }]] : [])],
   resize_keyboard: true,
 });
 const isAdmin = (env: Env, uid: number) => adminIds(env).includes(uid);
@@ -64,6 +65,7 @@ async function onMessage(c: Ctx, m: TgMessage): Promise<void> {
     case "np_view": return gotNpField(c, user, s.data, "view", text);
     case "np_when": return gotWhen(c, user, s.data, text);
   }
+  if (s.state === "chat") return chat.turn(c, user, m, text, s.data);
   if (s.state.startsWith("ag_")) return agentUi.onText(c, user, admin, s.state, s.data, text);
   await tg.send(env, uid, "از منوی پایین استفاده کنید.", mainKb(admin));
 }
@@ -77,6 +79,7 @@ async function menu(c: Ctx, user: UserRow, admin: boolean, text: string): Promis
     case B.NEW: return newPost(c, user);
     case B.SCHED: return scheduled(env, uid);
     case B.AGENT: return agentUi.home(env, user);
+    case B.CHAT: return chat.start(env, user);
     case B.CHAN: return channels(env, uid);
     case B.APPS: return apps(env, user);
     case B.ME: return account(env, user, admin);
@@ -90,6 +93,7 @@ const HELP = "<b>💡 راهنما</b>\n\n" +
   "1️⃣ <b>برنامه‌های متصل</b>: توکن ایتایار را ثبت کنید\n" +
   "2️⃣ <b>کانال‌ها</b>: کانال را اضافه کنید (حساب یا ربات باید در کانال ادمین باشد)\n" +
   "3️⃣ <b>پست جدید</b>: کانال را انتخاب و متن یا فایل (تا ۲۰ مگابایت) را بفرستید؛ سپس ارسال یا زمان‌بندی\n\n" +
+  "💬 <b>گفتگو با ایجنت</b>: زنده با ایجنت حرف بزنید؛ همان لحظه کار را انجام می‌دهد و نتیجه را می‌گوید\n" +
   "🤖 <b>ایجنت هوشمند</b>: با زبان ساده بگویید چه کاری و چه ساعتی انجام شود (مثلاً از کانال‌های عمومی محتوا بیاورد یا هر صبح پیام صبح‌بخیر بگذارد)\n\n" +
   "⏱ نمونه زمان: <code>18:30</code> · <code>فردا 09:00</code> · <code>+45</code> · <code>1405/07/20 18:30</code>";
 
@@ -261,7 +265,7 @@ async function adminCmd(env: Env, cmd: string, a: string[]): Promise<string> {
       if (!name) return "استفاده: /src channelname";
       const r = await fetchChannel(env, name);
       const m = r.messages[r.messages.length - 1];
-      return `🔬 ${esc(name)} — HTTP ${r.status} — پیام‌های شناسایی‌شده: ${r.messages.length}${r.title ? `\nعنوان: ${esc(r.title)}` : ""}${r.note ? `\n⚠️ ${esc(r.note)}` : ""}` +
+      return `🔬 ${esc(name)} — HTTP ${r.status} — پیام‌های شناسایی‌شده: ${r.messages.length} (عکس: ${r.messages.filter((x) => x.image && !x.sticker).length}، استیکر: ${r.messages.filter((x) => x.sticker).length})${r.title ? `\nعنوان: ${esc(r.title)}` : ""}${r.note ? `\n⚠️ ${esc(r.note)}` : ""}` +
         (m ? `\n\nآخرین پیام (#${m.id}${m.image ? " 🖼" : ""}):\n${esc(cleanText(m.text, name, r.title).slice(0, 500))}` : `\n\nنمونه‌ی متن صفحه:\n${esc(r.snippet)}`);
     }
     case "/ban": case "/unban": {

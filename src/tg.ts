@@ -54,3 +54,7 @@ export async function download(env: Env, fileId: string): Promise<Uint8Array> {
   if (!r.ok) throw new TgError(`دانلود فایل از تلگرام ناموفق بود (HTTP ${r.status})`);
   return new Uint8Array(await r.arrayBuffer());
 }
+
+export async function typing(env: Env, chat: number): Promise<void> {
+  try { await tg(env, "sendChatAction", { chat_id: chat, action: "typing" }); } catch { /* ignore */ }
+}

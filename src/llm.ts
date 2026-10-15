@@ -37,7 +37,7 @@ export async function callOne(cfg: LlmCfg, body: Record<string, unknown>, timeou
       if (j?.error) throw new Error(String(j.error.message || "خطای نامشخص از سرویس").slice(0, 160));
       return j;
     } catch (e) {
-      if ((e as Error).name === "AbortError") { if (attempt === 0) continue; throw new Error("پاسخ نداد (timeout)"); }
+      if ((e as Error).name === "AbortError") { if (attempt === 0 && timeoutMs >= 30_000) continue; throw new Error("پاسخ نداد (timeout)"); }
       throw e;
     } finally { clearTimeout(timer); }
   }
@@ -69,12 +69,12 @@ export function chatJson(env: Env, system: string, user: string, maxTokens = 150
 }
 
 /** One step of a tool-calling conversation (OpenAI-compatible function calling). */
-export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[]): Promise<ChatMsg> {
+export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[], timeoutMs = 45_000): Promise<ChatMsg> {
   return viaChain(env, async (cfg) => {
     const msgs = cfg.id === "gemini"   // Gemini's compatibility layer wants the tool name on tool results
       ? messages.map((m) => (m.role === "tool" ? { ...m, name: messages.flatMap((x) => x.tool_calls || []).find((c) => c.id === m.tool_call_id)?.function.name } : m))
       : messages;
-    const j = await callOne(cfg, { temperature: 0.3, max_tokens: 2500, messages: msgs, tools, tool_choice: "auto" });
+    const j = await callOne(cfg, { temperature: 0.3, max_tokens: 2500, messages: msgs, tools, tool_choice: "auto" }, timeoutMs);
     const m = j?.choices?.[0]?.message;
     if (!m) throw new Error("پاسخ نامعتبر");
     const calls = (m.tool_calls || []).map((c: any, i: number) => ({ ...c, id: c.id || `call_${Date.now().toString(36)}_${i}`, type: "function" }));

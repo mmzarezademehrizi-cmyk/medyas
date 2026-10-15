@@ -34,17 +34,24 @@ async def eitaa(req):
         return web.json_response({"ok": False, "description": f"invalid token {tok}"})
     if m == "getMe":
         return web.json_response({"ok": True, "result": {"username": "eitaayar_acc"}})
+    if form.get("chat_id") == "failchan":
+        return web.json_response({"ok": False, "description": "chat not found or bot is not admin"})
     return web.json_response({"ok": True, "result": {"message_id": 777}})
 
 
 def render(name):
     out = ['<html><head><meta property="og:title" content="کانال %s - Eitaa"></head><body><div class="tgme_widget_message_history">' % name]
     for p in PAGES.get(name, []):
-        photo = ('<a class="tgme_widget_message_photo_wrap" href="x" style="width:453px;background-image:url(\'%s\')"></a>' % p["image"]) if p.get("image") else ""
-        text = html.escape(p["text"]).replace("\n", "<br/>")
-        out.append('<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="%s/%s">%s'
-                   '<div class="tgme_widget_message_text js-message_text" dir="auto">%s</div><div class="tgme_widget_message_footer"><a class="tgme_widget_message_date" href="x"><time datetime="%s" class="time">12:00</time></a></div></div></div>'
-                   % (name, p["id"], photo, text, p["ts"]))
+        media = ""
+        if p.get("image"):
+            media = '<a class="tgme_widget_message_photo_wrap" href="x" style="width:453px;background-image:url(\'%s\')"></a>' % p["image"]
+        if p.get("sticker"):
+            media = '<a class="tgme_widget_message_sticker_wrap" href="x"><i class="tgme_widget_message_sticker" data-webp="%s" style="background-image:url(\'%s\')"></i></a>' % (p["sticker"], p["sticker"])
+        text = ""
+        if p["text"]:
+            text = '<div class="tgme_widget_message_text js-message_text" dir="auto">%s</div>' % html.escape(p["text"]).replace("\n", "<br/>")
+        out.append('<div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message text_not_supported_wrap js-widget_message" data-post="%s/%s">' % (name, p["id"])
+                   + media + text + '<div class="tgme_widget_message_footer"><a class="tgme_widget_message_date" href="x"><time datetime="%s" class="time">12:00</time></a></div></div></div>' % p["ts"])
     out.append("</div></body></html>")
     return "".join(out)
 
@@ -88,6 +95,8 @@ async def llm(req):
     msgs, tools = body["messages"], body.get("tools")
     system = msgs[0]["content"]
     LOG.append({"svc": "llm", "tools": bool(tools), "n": len(msgs)})
+    if "LIVE CHAT RULES" in system:
+        return live_chat(msgs, system)
     if not tools:      # planner
         instr = msgs[-1]["content"]
         times = ["07:00"] if ("۷" in instr or "7" in instr) else (["09:00", "14:00"] if "۹ و ۱۴" in instr else [])
@@ -111,6 +120,15 @@ async def llm(req):
                 return reply(calls=[tool_call(3, "retry_later", {"minutes": 10, "reason": "پست امروز هنوز نیامده"})])
             return reply(calls=[tool_call(3, "post_to_channel", {"text": "🌞 صبح بخیر\n" + results["get_current_time"]["jalali"]})])
         return reply(calls=[tool_call(4, "finish", {"summary": "پیام صبح بخیر امروز منتشر شد."})])
+    if "استیکر" in task:
+        if not called:
+            return reply(calls=[tool_call(1, "read_channel", {"channel": "sticker_ch"})])
+        if "post_to_channel" not in called:
+            st = [p for p in results["read_channel"]["posts"] if p["has_sticker"] and not p["used"]]
+            if not st:
+                return reply(calls=[tool_call(5, "finish", {"summary": "استیکری پیدا نشد."})])
+            return reply(calls=[tool_call(7, "post_to_channel", {"text": "", "image_ref": st[0]["ref"], "source_refs": [st[0]["ref"]]})])
+        return reply(calls=[tool_call(8, "finish", {"summary": "استیکر فرستاده شد."})])
     if "ورزش" in task:
         if not called:
             return reply(calls=[tool_call(1, "read_channel", {"channel": "sport_ch"})])
@@ -121,6 +139,29 @@ async def llm(req):
             return reply(calls=[tool_call(10 + i, "post_to_channel", {"text": p["text"], "source_refs": [p["ref"]], "delay_minutes": 20 * i}) for i, p in enumerate(good)])
         return reply(calls=[tool_call(6, "finish", {"summary": "مطالب ورزشی منتشر شد."})])
     return reply(content="کاری برای انجام نبود.")
+
+
+def live_chat(msgs, system):
+    utext = [m for m in msgs if m["role"] == "user"][-1]["content"]
+    names = {c["id"]: c["function"]["name"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
+    results = {names[m["tool_call_id"]]: json.loads(m["content"]) for m in msgs if m["role"] == "tool"}
+    called = list(names.values())
+    # the current turn's tool calls are everything after the last user message
+    if "post_to_channel" in called:
+        r = results["post_to_channel"]
+        return reply(content=("فرستادم ✅ (" + r["channel"] + ")") if r["status"] == "sent" else ("نشد ❌: " + r["error"]))
+    if "استیکر" in utext:
+        if "read_channel" not in called:
+            return reply(calls=[tool_call(1, "read_channel", {"channel": "sticker_ch"})])
+        st = [p for p in results["read_channel"]["posts"] if p["has_sticker"]]
+        return reply(calls=[tool_call(2, "post_to_channel", {"text": "", "image_ref": st[0]["ref"]})])
+    if "سلام" in utext:
+        args = {"text": "سلام"}
+        mm = re.search(r"id=(\d+) «خراب»", system)
+        if "خراب" in utext and mm:
+            args["channel_id"] = int(mm.group(1))
+        return reply(calls=[tool_call(3, "post_to_channel", args)])
+    return reply(content="چه کاری انجام بدهم؟")
 
 
 async def log(req):

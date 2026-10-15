@@ -1,6 +1,7 @@
 #!/bin/bash
 # Starts the fake services + the Worker (workerd, local D1), runs the e2e suite, then stops everything.
 cd "$(dirname "$0")/.."
+pkill -f wrangler-dist 2>/dev/null; pkill -f workerd 2>/dev/null; pkill -f mock_servers 2>/dev/null; sleep 1
 rm -rf .wrangler
 cat > .dev.vars <<VARS
 BOT_TOKEN=123456:TESTTOKEN
@@ -20,5 +21,5 @@ WD=$!
 for i in $(seq 1 90); do curl -s -m 2 localhost:8787/health | grep -q ok && break; sleep 1; done
 python3 test/e2e.py
 RC=$?
-kill $MOCK $WD 2>/dev/null; pkill -f workerd 2>/dev/null
+kill $MOCK $WD 2>/dev/null; pkill -f wrangler-dist 2>/dev/null; pkill -f workerd 2>/dev/null
 exit $RC

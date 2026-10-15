@@ -28,6 +28,7 @@ def sent_to(user): return [e["body"]["text"] for e in log() if e["svc"] == "tg" 
 def eitaa_calls(m): return [e for e in log() if e["svc"] == "eitaa" and e["method"] == m]
 def d1(sql): return subprocess.run(["npx", "wrangler", "d1", "execute", "medyas-db", "--local", "--command", sql], capture_output=True, text=True).stdout
 def settle(): time.sleep(1.5)
+def chat_wait(): time.sleep(6)   # a chat turn = several LLM round-trips
 
 
 def check(name, cond, extra=""):
@@ -243,6 +244,39 @@ check("approved draft is published", "sent" in d1(f"SELECT status FROM posts WHE
 if len(drafts) > 1:
     cb(USER, f"ag:no:{drafts[1]['id']}"); settle()
     check("rejected draft is canceled", "canceled" in d1(f"SELECT status FROM posts WHERE id={drafts[1]['id']}"))
+
+
+# ---------------- stickers: a scheduled agent can find a sticker on a source channel and send it
+setpage("sticker_ch", [{"id": 31, "ts": ISO, "text": "یک پست عادی", "image": None},
+                       {"id": 30, "ts": ISO, "text": "", "image": None, "sticker": f"{M}/img/cal30.webp"}])
+clear(); cb(USER, "ag:new"); msg(USER, "هر روز ساعت ۷ یک استیکر تقویم از کانال @sticker_ch پیدا کن و بفرست"); msg(USER, "-"); cb(USER, "ag:mk"); settle()
+J3 = job_id(); clear(); cb(USER, f"ag:run:{J3}"); tick(2)
+ef = eitaa_calls("sendFile")
+check("sticker found on the source channel and sent as sticker.webp (no caption)", len(ef) == 1 and ef[0]["form"]["file"]["filename"] == "sticker.webp" and "caption" not in ef[0]["form"], str(ef))
+
+# ---------------- live chat: act now, report the real result
+clear(); msg(USER, "💬 گفتگو با ایجنت"); chat_wait()
+check("chat intro shown", any("گفتگوی زنده" in t for t in sent_to(USER)), str(sent_to(USER)))
+clear(); msg(USER, "برای تست یک سلام توی کانالم بفرست"); chat_wait()
+em = eitaa_calls("sendMessage")
+edits = [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "editMessageText"]
+check("chat sent the message for real", len(em) == 1 and em[0]["form"]["text"] == "سلام", str(em))
+check("chat reports success in one reply, without the extra delivery notice", any("فرستادم" in t for t in edits) and not any("✅ پست #" in t for t in sent_to(USER)), str((edits, sent_to(USER))))
+clear(); mid = uid[0] + 500
+post({"message": {"message_id": mid, "from": {"id": USER, "first_name": "u2"}, "chat": {"id": USER, "type": "private"}, "text": "یک سلام بفرست"}}); chat_wait()
+post({"message": {"message_id": mid, "from": {"id": USER, "first_name": "u2"}, "chat": {"id": USER, "type": "private"}, "text": "یک سلام بفرست"}}); chat_wait()
+check("Telegram re-delivery of the same message does not send twice", len(eitaa_calls("sendMessage")) == 1, str(eitaa_calls("sendMessage")))
+msg(USER, "💬 گفتگو با ایجنت"); chat_wait()   # (the artificial big message id above would otherwise look like a re-delivery for the next ones)
+clear(); msg(USER, "یک استیکر از کانال @sticker_ch بفرست"); chat_wait()
+ef = eitaa_calls("sendFile")
+check("chat forwards a sticker", len(ef) == 1 and ef[0]["form"]["file"]["filename"] == "sticker.webp", str(ef))
+# a failing destination is reported honestly (never "sent")
+d1("INSERT INTO channels(user_id,chat_id,title,platform,created_at) VALUES(2,'failchan','خراب','eitaa',0)")
+clear(); msg(USER, "سلام را به کانال خراب بفرست"); chat_wait()
+edits = [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "editMessageText"]
+check("failure is reported truthfully", any("نشد" in t and "chat not found" in t for t in edits) and "failed" in d1("SELECT status FROM posts ORDER BY id DESC LIMIT 1"), str(edits))
+d1("DELETE FROM channels WHERE chat_id='failchan'")
+clear(); msg(USER, "✍️ پست جدید"); chat_wait()
 
 # ---------------- isolation + cleanup
 clear(); cb(OTHER, f"ag:tg:{J2}"); settle()

@@ -124,14 +124,40 @@ async function runJob(env: Env, j: JobRow, slot: Slot, t: number): Promise<void>
   if (retry) console.log("agent retry", j.id, retry);
 }
 
+// ------------------------------------------------------------------ shared tool: read a public channel
+export interface RefInfo { image: string; text: string; sticker: boolean }
+export interface ReadState { channels: Map<string, Awaited<ReturnType<typeof fetchChannel>>>; refs: Map<string, RefInfo> }
+
+/** The read_channel tool, used by both the scheduled agent and the live chat. `jobId` (if any) marks posts already used by that job. */
+export async function readChannel(env: Env, st: ReadState, a: any, jobId: number | null, maxChannels: number): Promise<unknown> {
+  const cid = normalizeChatId(String(a.channel || "")).replace(/^@/, "");
+  if (!/^[A-Za-z0-9_.]{3,64}$/.test(cid) || /^\d+$/.test(cid)) return { error: "invalid channel username" };
+  if (!st.channels.has(cid) && st.channels.size >= maxChannels) return { error: `at most ${maxChannels} channels per run` };
+  let r = st.channels.get(cid);
+  if (!r) { r = await fetchChannel(env, cid); st.channels.set(cid, r); }
+  if (!r.ok) return { error: r.note || "could not read channel (is it public?)" };
+  const limit = Math.min(Math.max(parseInt(a.limit, 10) || 12, 1), 20);
+  const msgs = r.messages.slice(-limit).reverse();
+  const seen = jobId === null ? new Set<string>() : new Set((await env.DB.prepare("SELECT k FROM agent_seen WHERE job_id=?").bind(jobId).all<{ k: string }>()).results.map((x) => x.k));
+  return {
+    channel: cid, title: r.title,
+    posts: msgs.map((m) => {
+      const ref = `${cid}/${m.id}`, text = cleanText(m.text, cid, r!.title);
+      st.refs.set(ref, { image: m.image, text, sticker: m.sticker });
+      const d = m.ts ? toLocal(m.ts) : null;
+      return { ref, date: d ? `${d.y}-${pad2(d.mo)}-${pad2(d.d)} ${pad2(d.h)}:${pad2(d.mi)}` : null, text: text.slice(0, 1200), has_image: !!m.image && !m.sticker, has_sticker: m.sticker, has_video: m.video, used: seen.has(ref) };
+    }),
+  };
+}
+
 // ------------------------------------------------------------------ the agent loop
 interface RunResult { summary: string; posts: number; retryMin: number | null; error?: boolean }
 
 const TOOLS = (final: boolean): ToolDef[] => [
-  { type: "function", function: { name: "read_channel", description: "Read the latest posts of a PUBLIC Eitaa channel (by its @id / username). Returns newest first. Text already has the channel's own signature removed. Posts with used=true were already published by this agent before.",
+  { type: "function", function: { name: "read_channel", description: "Read the latest posts of a PUBLIC Eitaa channel (by its @id / username). Returns newest first. Text already has the channel's own signature removed. Posts with used=true were already published by this agent before. Posts may be images (has_image) or stickers (has_sticker).",
     parameters: { type: "object", properties: { channel: { type: "string", description: "channel username without @" }, limit: { type: "integer", description: "how many posts, default 12, max 20" } }, required: ["channel"] } } },
   { type: "function", function: { name: "get_current_time", description: "Current date and time in Tehran: Jalali (Persian) date, weekday, Gregorian date, clock.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "post_to_channel", description: "Publish a post to the owner's channel. The owner's signature is appended automatically — do NOT add a signature yourself. Optionally attach the image of a post you read (image_ref).",
+  { type: "function", function: { name: "post_to_channel", description: "Publish a post to the owner's channel. The owner's signature is appended automatically — do NOT add a signature yourself. Optionally attach the image (or send the sticker) of a post you read via image_ref; for a sticker leave text empty.",
     parameters: { type: "object", properties: {
       text: { type: "string", description: "final post text in Persian (for posts with an image: max 900 chars)" },
       image_ref: { type: "string", description: "ref of a read post whose image should be attached, e.g. \"channel/123\"" },
@@ -148,7 +174,7 @@ async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promis
   if (!ch || ch.user_id !== j.user_id) return { summary: "کانال مقصد دیگر وجود ندارد.", posts: 0, retryMin: null, error: true };
   const t0 = Date.now(), t = now();
   const recent = (await env.DB.prepare("SELECT text, created_at FROM posts WHERE job_id=? AND created_at>? AND status IN ('pending','draft','sending','sent') ORDER BY id DESC LIMIT 12").bind(j.id, t - 3 * 86400).all<{ text: string; created_at: number }>()).results;
-  const state = { posts: 0, retryMin: null as number | null, summary: "", done: false, channels: new Map<string, Awaited<ReturnType<typeof fetchChannel>>>(), refs: new Map<string, { image: string; text: string }>() };
+  const state = { posts: 0, retryMin: null as number | null, summary: "", done: false, channels: new Map<string, Awaited<ReturnType<typeof fetchChannel>>>(), refs: new Map<string, RefInfo>() };
   const recentNorm = new Set(recent.map((r) => norm(r.text).replace(/\s+/g, " ").slice(0, 120)));
 
   const system =
@@ -170,35 +196,17 @@ async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promis
         const n = now(), l = toLocal(n);
         return { jalali: jalaliLong(n), gregorian: `${l.y}-${pad2(l.mo)}-${pad2(l.d)}`, time: `${pad2(l.h)}:${pad2(l.mi)}`, timezone: "Asia/Tehran" };
       }
-      case "read_channel": {
-        const cid = normalizeChatId(String(a.channel || "")).replace(/^@/, "");
-        if (!/^[A-Za-z0-9_.]{3,64}$/.test(cid) || /^\d+$/.test(cid)) return { error: "invalid channel username" };
-        if (!state.channels.has(cid) && state.channels.size >= MAX_CHANNELS_PER_RUN) return { error: `at most ${MAX_CHANNELS_PER_RUN} channels per run` };
-        let r = state.channels.get(cid);
-        if (!r) { r = await fetchChannel(env, cid); state.channels.set(cid, r); }
-        if (!r.ok) return { error: r.note || "could not read channel (is it public?)" };
-        const limit = Math.min(Math.max(parseInt(a.limit, 10) || 12, 1), 20);
-        const msgs = r.messages.slice(-limit).reverse();
-        const seen = new Set((await env.DB.prepare("SELECT k FROM agent_seen WHERE job_id=?").bind(j.id).all<{ k: string }>()).results.map((x) => x.k));
-        return {
-          channel: cid, title: r.title,
-          posts: msgs.map((m) => {
-            const ref = `${cid}/${m.id}`, text = cleanText(m.text, cid, r!.title);
-            state.refs.set(ref, { image: m.image, text });
-            const d = m.ts ? toLocal(m.ts) : null;
-            return { ref, date: d ? `${d.y}-${pad2(d.mo)}-${pad2(d.d)} ${pad2(d.h)}:${pad2(d.mi)}` : null, text: text.slice(0, 1200), has_image: !!m.image, has_video: m.video, used: seen.has(ref) };
-          }),
-        };
-      }
+      case "read_channel": return readChannel(env, state, a, j.id, MAX_CHANNELS_PER_RUN);
       case "post_to_channel": {
         if (state.posts >= MAX_POSTS_PER_RUN) return { error: "post limit for this run reached" };
         let text = String(a.text || "").trim();
         const refs: string[] = Array.isArray(a.source_refs) ? a.source_refs.map(String).slice(0, 10) : [];
         const imageRef = a.image_ref ? String(a.image_ref) : "";
-        const img = imageRef ? state.refs.get(imageRef)?.image || "" : "";
-        if (imageRef && !img) return { error: "image_ref has no image (use a ref from read_channel with has_image=true) — publish without image_ref or fix it" };
+        const ri = imageRef ? state.refs.get(imageRef) : undefined, img = ri?.image || "", isSticker = !!ri?.sticker;
+        if (imageRef && !img) return { error: "image_ref has no image/sticker (use a ref from read_channel with has_image or has_sticker = true) — publish without image_ref or fix it" };
+        if (isSticker) text = "";   // a sticker carries no caption, so no signature either
         if (!text && !img) return { error: "empty post" };
-        const full = text + (j.footer ? `${text ? "\n\n" : ""}${j.footer}` : "");
+        const full = text ? text + (j.footer ? `\n\n${j.footer}` : "") : isSticker ? "" : (j.footer || "");
         if (img && full.length > 1000) return { error: "text + signature too long for a post with image (max 1000 chars): shorten it or publish without image_ref" };
         if (full.length > 3900) return { error: "text too long (max ~3900 chars)" };
         const sig = norm(text).replace(/\s+/g, " ").slice(0, 120);
@@ -206,7 +214,7 @@ async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promis
         const delay = Math.min(Math.max(parseInt(a.delay_minutes, 10) || 0, 0), 720);
         const draft = !!j.approve;
         const ins = await env.DB.prepare("INSERT INTO posts(user_id,channel_id,kind,text,file_id,file_name,title,silent,pin,view_delete,run_at,status,created_at,src_url,job_id) VALUES(?,?,?,?,'',?,'',0,0,0,?,?,?,?,?)")
-          .bind(j.user_id, j.channel_id, img ? "file" : "text", full, img ? "image.jpg" : "", now() + delay * 60, draft ? "draft" : "pending", now(), img, j.id).run();
+          .bind(j.user_id, j.channel_id, img ? "file" : "text", full, isSticker ? "sticker.webp" : "", now() + delay * 60, draft ? "draft" : "pending", now(), img, j.id).run();
         const postId = ins.meta.last_row_id as number;
         recentNorm.add(sig);
         state.posts++;

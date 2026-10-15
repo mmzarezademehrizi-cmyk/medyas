@@ -4,7 +4,7 @@
 import { Env, eitaaWeb } from "./env";
 import { normDigits } from "./util";
 
-export interface SrcMsg { source: string; id: string; text: string; ts: number | null; image: string; video: boolean }
+export interface SrcMsg { source: string; id: string; text: string; ts: number | null; image: string; video: boolean; sticker: boolean }
 export interface FetchResult { ok: boolean; status: number; messages: SrcMsg[]; title: string; note: string; snippet: string }
 
 const ENT: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ", laquo: "«", raquo: "»", hellip: "…", zwnj: "‌" };
@@ -50,9 +50,20 @@ export function parseMessages(html: string, source: string, base: string): SrcMs
       || block.match(/background-image:\s*url\(\s*['"&quot;]*([^'")]+?)['"&quot;]*\s*\)[^>]*class=["'][^"']*photo_wrap/i)
       || block.match(/<img[^>]+class=["'][^"']*photo[^"']*["'][^>]+src=["']([^"']+)["']/i);
     if (pm) image = abs(pm[1]);
+    // stickers: the static .webp is in data-webp (or the background image of the *_sticker element)
+    let sticker = false;
+    if (!image) {
+      const wp = block.match(/data-webp=["']([^"']+)["']/i);
+      let su = wp ? wp[1] : "";
+      if (!su) for (const tag of block.matchAll(/<[^>]+class=["'][^"']*_sticker[^"']*["'][^>]*>/gi)) {
+        const bg = tag[0].match(/background-image:\s*url\(\s*['"&quot;]*([^'")]+?)['"&quot;]*\s*\)/i) || tag[0].match(/(?:src|data-src)=["']([^"']+\.webp[^"']*)["']/i);
+        if (bg) { su = bg[1]; break; }
+      }
+      if (su) { image = abs(su); sticker = true; }
+    }
     const video = /_widget_message_video|<video[\s>]/i.test(block);
     if (!text && !image) continue;
-    out.push({ source, id, text, ts, image, video });
+    out.push({ source, id, text, ts, image, video, sticker });
   }
   return out;
 }

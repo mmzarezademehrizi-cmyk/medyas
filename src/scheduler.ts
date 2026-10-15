@@ -15,7 +15,7 @@ const MAX_IMG = 15 * 1024 * 1024;
 async function fileBytes(env: Env, p: PostRow): Promise<{ bytes: Uint8Array; name: string }> {
   if (p.src_url) {
     const f = await fetchBytes(p.src_url, MAX_IMG, eitaaWeb(env) + "/");
-    return { bytes: f.bytes, name: `image.${extFor(f.type, p.src_url)}` };
+    return { bytes: f.bytes, name: p.file_name || `image.${extFor(f.type, p.src_url)}` };
   }
   return { bytes: await tg.download(env, p.file_id), name: p.file_name || "file" };
 }
@@ -30,7 +30,8 @@ async function sendOnce(env: Env, token: string, p: PostRow, ch: ChannelRow): Pr
 }
 
 /** Claims the post (pending -> sending) so two ticks can never send the same post twice, then sends with retries. */
-export async function deliver(env: Env, postId: number): Promise<void> {
+/** `quiet` = the caller (live chat) reports the outcome itself, so no Telegram notices are sent. */
+export async function deliver(env: Env, postId: number, quiet = false): Promise<void> {
   const claim = await env.DB.prepare("UPDATE posts SET status='sending', claimed_at=? WHERE id=? AND status='pending'").bind(now(), postId).run();
   if (!claim.meta.changes) return;
   const p = (await env.DB.prepare("SELECT * FROM posts WHERE id=?").bind(postId).first<PostRow>())!;
@@ -38,7 +39,7 @@ export async function deliver(env: Env, postId: number): Promise<void> {
   const ch = await env.DB.prepare("SELECT * FROM channels WHERE id=?").bind(p.channel_id).first<ChannelRow>();
   const fail = async (msg: string) => {
     await env.DB.prepare("UPDATE posts SET status='failed', error=? WHERE id=?").bind(msg.slice(0, 300), p.id).run();
-    await tg.send(env, p.user_id, `❌ ارسال پست #${p.id} ناموفق بود:\n${esc(msg)}`);
+    if (!quiet) await tg.send(env, p.user_id, `❌ ارسال پست #${p.id} ناموفق بود:\n${esc(msg)}`);
   };
   if (!user || !ch) return fail("کاربر یا کانال دیگر وجود ندارد.");
   const token = await dec(env.SECRET_KEY, user.eitaa_token_enc);
@@ -48,7 +49,7 @@ export async function deliver(env: Env, postId: number): Promise<void> {
     try {
       const mid = await sendOnce(env, token, p, ch);
       await env.DB.prepare("UPDATE posts SET status='sent', sent_at=?, eitaa_message_id=?, error='' WHERE id=?").bind(now(), mid, p.id).run();
-      await tg.send(env, p.user_id, `✅ پست #${p.id} در 🟠 «${esc(ch.title)}» ارسال شد.`);
+      if (!quiet) await tg.send(env, p.user_id, `✅ پست #${p.id} در 🟠 «${esc(ch.title)}» ارسال شد.`);
       return;
     } catch (e) {
       last = (e as Error).message;
