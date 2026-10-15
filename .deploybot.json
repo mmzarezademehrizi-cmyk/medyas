@@ -17,8 +17,8 @@
       "generate": "hex"
     },
     {
-      "name": "LLM_API_KEY",
-      "prompt": "اختیاری ولی لازم برای «ایجنت هوشمند»: کلید API دیپ‌سیک (platform.deepseek.com). می‌توانید بعداً از «🛠 مدیریت» داخل ربات هم ثبت کنید.",
+      "name": "GEMINI_API_KEY",
+      "prompt": "اختیاری ولی لازم برای «ایجنت هوشمند» (رایگان): کلید Gemini از aistudio.google.com/apikey. می‌توانید بعداً از «🛠 مدیریت ← 🧠 تنظیم هوش مصنوعی» داخل ربات هم ثبت کنید (OpenRouter و ChatGPT و DeepSeek هم همان‌جا).",
       "optional": true
     },
     {
