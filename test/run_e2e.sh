@@ -10,7 +10,7 @@ ADMIN_IDS=1
 TG_API_BASE=http://127.0.0.1:9999
 EITAA_API_BASE=http://127.0.0.1:9999/api
 EITAA_WEB_BASE=http://127.0.0.1:9999
-LLM_BASE_URL=http://127.0.0.1:9999/llm
+OPENROUTER_BASE_URL=http://127.0.0.1:9999/llm
 VARS
 npx wrangler d1 migrations apply medyas-db --local >/tmp/migr.log 2>&1 || { cat /tmp/migr.log; exit 1; }
 python3 test/mock_servers.py >/tmp/mock.log 2>&1 &

@@ -1,7 +1,8 @@
 // Telegram UI of the agent: list, create (free-text task -> plan -> confirm), edit, run now, approve drafts.
 import { Plan, describeSchedule, parseJson, parseTimes, planJob } from "./agent";
-import { JobRow, UserRow, getChannel, getJob, llmKey, now, setSession, clearSession, userChannels, userJobs } from "./db";
+import { JobRow, UserRow, getChannel, getJob, now, setSession, clearSession, userChannels, userJobs } from "./db";
 import { Env } from "./env";
+import { llmReady } from "./providers";
 import * as tg from "./tg";
 import { Btn, TgCallback, ikb } from "./tg";
 import { esc, slotKey } from "./util";
@@ -18,8 +19,8 @@ const GUIDE =
 
 // ------------------------------------------------------------------ list
 export async function home(env: Env, u: UserRow): Promise<void> {
-  const ready = !!(await llmKey(env));
-  if (!ready) return void (await tg.send(env, u.id, "⏳ ایجنت هوشمند هنوز فعال نشده است (مدیر باید کلید هوش مصنوعی را در «🛠 مدیریت» ثبت کند)."));
+  const ready = await llmReady(env);
+  if (!ready) return void (await tg.send(env, u.id, "⏳ ایجنت هوشمند هنوز فعال نشده است (مدیر باید یک سرویس هوش مصنوعی را در «🛠 مدیریت» تنظیم کند)."));
   const jobs = await userJobs(env, u.id);
   const rows: Btn[][] = jobs.map((j) => [[`${j.enabled ? "🟢" : "⚪️"} ${j.name || "ایجنت " + j.id}`.slice(0, 40), `ag:v:${j.id}`] as Btn]);
   if (jobs.length < MAX_JOBS) rows.push([["➕ ایجنت جدید", "ag:new"]]);
@@ -119,7 +120,7 @@ export async function onText(c: Ctx, user: UserRow, admin: boolean, state: strin
 export async function onCallback(c: Ctx, user: UserRow, admin: boolean, q: TgCallback, act: string, arg: string, s: { state: string; data: Record<string, any> }): Promise<void> {
   const { env } = c, uid = user.id, mid = q.message?.message_id;
   const ans = (t = "", alert = false) => tg.answer(env, q.id, t, alert);
-  if (!(await llmKey(env))) return ans("ایجنت هنوز فعال نشده است.", true);
+  if (!(await llmReady(env))) return ans("ایجنت هنوز فعال نشده است.", true);
 
   if (act === "new") {
     await ans();

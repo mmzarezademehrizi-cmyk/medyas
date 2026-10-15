@@ -37,15 +37,5 @@ export const getChannel = (env: Env, id: number) => env.DB.prepare("SELECT * FRO
 export const userChannels = async (env: Env, uid: number) =>
   (await env.DB.prepare("SELECT * FROM channels WHERE user_id=? ORDER BY id").bind(uid).all<ChannelRow>()).results;
 
-// Platform-level LLM key for the agent: LLM_API_KEY secret wins, otherwise the one the admin saved from the bot (encrypted).
-export async function llmKey(env: Env): Promise<string> {
-  if (env.LLM_API_KEY && env.LLM_API_KEY.trim()) return env.LLM_API_KEY.trim();
-  const r = await env.DB.prepare("SELECT value FROM settings WHERE key='llm_key_enc'").first<{ value: string }>();
-  return r ? await dec(env.SECRET_KEY, r.value) : "";
-}
-export async function saveLlmKey(env: Env, key: string): Promise<void> {
-  await env.DB.prepare("INSERT INTO settings(key,value) VALUES('llm_key_enc',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").bind(await enc(env.SECRET_KEY, key)).run();
-}
-export const clearLlmKey = (env: Env) => env.DB.prepare("DELETE FROM settings WHERE key='llm_key_enc'").run();
 export const getJob = (env: Env, id: number) => env.DB.prepare("SELECT * FROM agent_jobs WHERE id=?").bind(id).first<JobRow>();
 export const userJobs = async (env: Env, uid: number) => (await env.DB.prepare("SELECT * FROM agent_jobs WHERE user_id=? ORDER BY id").bind(uid).all<JobRow>()).results;

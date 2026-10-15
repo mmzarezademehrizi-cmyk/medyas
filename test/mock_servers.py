@@ -81,6 +81,8 @@ def reply(content=None, calls=None):
 
 async def llm(req):
     body = await req.json()
+    if req.headers.get("authorization") == "Bearer testkey_NOBALANCE":
+        return web.json_response({"error": {"message": "Insufficient Balance"}}, status=402)
     if req.headers.get("authorization") != "Bearer testkey_LLM123":
         return web.json_response({"error": "bad key"}, status=401)
     msgs, tools = body["messages"], body.get("tools")

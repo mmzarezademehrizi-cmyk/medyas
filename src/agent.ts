@@ -2,9 +2,10 @@
 // "twice a day bring 2 posts about sport from these public channels and sign them with my id"). An LLM carries it out with a few tools:
 // read a public Eitaa channel, ask the date, publish to the owner's channel, retry later. Code (not the model) owns the schedule,
 // the owner's signature, duplicate protection and delivery.
-import { JobRow, getChannel, llmKey, now } from "./db";
+import { JobRow, getChannel, now } from "./db";
 import { Env } from "./env";
 import { ChatMsg, ToolDef, chatJson, chatTools } from "./llm";
+import { llmReady } from "./providers";
 import { cleanText, fetchChannel, norm } from "./source";
 import * as tg from "./tg";
 import { Btn, ikb } from "./tg";
@@ -45,10 +46,8 @@ export function describeSchedule(j: { times: string; days: string | null; once_a
 
 /** Turns the owner's sentence into a schedule + short name + a one-line summary of what the agent will do. */
 export async function planJob(env: Env, instruction: string): Promise<Plan | null> {
-  const key = await llmKey(env);
-  if (!key) return null;
   const t = now(), l = toLocal(t);
-  const r = await chatJson(env, key,
+  const r = await chatJson(env,
     "You read a Persian task description for a channel-content agent and extract its schedule. Reply with a JSON object only: " +
     '{"name": short Persian title (max 30 chars), "times": array of "HH:MM" 24h Tehran times the task runs each day (empty array if no time is stated), ' +
     '"days": null if every day, otherwise array of weekday numbers 0=Sunday,1=Monday,...,6=Saturday (Saturday=شنبه, Friday=جمعه), ' +
@@ -86,8 +85,7 @@ function dueSlot(j: JobRow, t: number): Slot | null {
 }
 
 export async function agentTick(env: Env): Promise<void> {
-  const key = await llmKey(env);
-  if (!key) return;
+  if (!(await llmReady(env))) return;
   const t = now();
   const jobs = (await env.DB.prepare("SELECT * FROM agent_jobs WHERE enabled=1 AND (retry_at IS NULL OR retry_at<=?) ORDER BY id LIMIT 200").bind(t).all<JobRow>()).results;
   let ran = 0;
@@ -101,17 +99,17 @@ export async function agentTick(env: Env): Promise<void> {
     }
     if (ran >= 2) break;   // keep each invocation within free-plan limits; the rest wait for the next minute
     ran++;
-    try { await runJob(env, key, j, slot, t); } catch (e) { console.error("agent job failed", j.id, (e as Error).message); }
+    try { await runJob(env, j, slot, t); } catch (e) { console.error("agent job failed", j.id, (e as Error).message); }
   }
 }
 
-async function runJob(env: Env, key: string, j: JobRow, slot: Slot, t: number): Promise<void> {
+async function runJob(env: Env, j: JobRow, slot: Slot, t: number): Promise<void> {
   const claim = await env.DB.prepare("UPDATE agent_jobs SET retry_at=?, attempts=attempts+1, run_now=0 WHERE id=? AND (retry_at IS NULL OR retry_at<=?) AND attempts=?")
     .bind(t + 300, j.id, t, j.attempts).run();
   if (!claim.meta.changes) return;
   const final = slot.kind === "manual" || j.attempts + 1 >= 3 || t - slot.epoch > RETRY_WINDOW_S;
   let res: RunResult;
-  try { res = await runAgent(env, key, j, slot, final); }
+  try { res = await runAgent(env, j, slot, final); }
   catch (e) { res = { summary: (e as Error).message, posts: 0, retryMin: null, error: true }; }
   const retry = !final && res.retryMin ? Math.min(Math.max(res.retryMin, 2), 30) : 0;
   const info = `${fmtDt(now())} — ${res.posts} پست — ${res.summary}`.slice(0, 500);
@@ -145,7 +143,7 @@ const TOOLS = (final: boolean): ToolDef[] => [
     parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } } },
 ];
 
-async function runAgent(env: Env, key: string, j: JobRow, slot: Slot, final: boolean): Promise<RunResult> {
+async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promise<RunResult> {
   const ch = await getChannel(env, j.channel_id);
   if (!ch || ch.user_id !== j.user_id) return { summary: "کانال مقصد دیگر وجود ندارد.", posts: 0, retryMin: null, error: true };
   const t0 = Date.now(), t = now();
@@ -235,7 +233,7 @@ async function runAgent(env: Env, key: string, j: JobRow, slot: Slot, final: boo
   const tools = TOOLS(final);
   for (let step = 0; step < MAX_STEPS && !state.done; step++) {
     if (Date.now() - t0 > RUN_BUDGET_MS) { state.summary ||= "زمان اجرا تمام شد."; break; }
-    const m = await chatTools(env, key, messages, tools);
+    const m = await chatTools(env, messages, tools);
     messages.push(m);
     if (!m.tool_calls?.length) { state.summary ||= (m.content || "").trim().slice(0, 400); break; }
     for (const c of m.tool_calls) {

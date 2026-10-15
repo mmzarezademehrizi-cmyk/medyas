@@ -124,16 +124,6 @@ check("site home is served", r.status_code == 200 and "text/html" in r.headers["
 check("unknown page still 404", c.get(f"{W}/nope").status_code == 404)
 
 
-# ======================================================================= AGENT
-def d1j(sql):
-    out = subprocess.run(["npx", "wrangler", "d1", "execute", "medyas-db", "--local", "--json", "--command", sql], capture_output=True, text=True).stdout
-    return json.loads(out)[0]["results"]
-def tick(n=1):
-    for _ in range(n):
-        c.get(f"{W}/__scheduled"); time.sleep(4)
-def setpage(name, posts): c.post(f"{M}/_page/{name}", json=posts)
-def buttons(user):
-    return " ".join(json.dumps(e["body"].get("reply_markup", ""), ensure_ascii=False) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == user)
 FA = "۰۱۲۳۴۵۶۷۸۹"; MONTHS = ["فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور", "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند"]
 tnow = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3, minutes=30)
 jd = jdatetime.date.fromgregorian(date=tnow.date())
@@ -145,12 +135,34 @@ OLD_MORNING = {"id": 10, "ts": ISO, "text": f"🌞 صبح بخیر\n{YEST}\n\n�
 NEW_MORNING = {"id": 11, "ts": ISO, "text": f"🌞 صبح بخیر\n{TODAY}\nروزتان پر از انرژی\n\n📢 عضویت در کانال ما\n🆔 @goodmorning_ch", "image": f"{M}/img/m11.jpg"}
 def job_id(): return d1j("SELECT id FROM agent_jobs ORDER BY id DESC LIMIT 1")[0]["id"]
 
+# ======================================================================= AGENT
+def d1j(sql):
+    out = subprocess.run(["npx", "wrangler", "d1", "execute", "medyas-db", "--local", "--json", "--command", sql], capture_output=True, text=True).stdout
+    return json.loads(out)[0]["results"]
+def tick(n=1):
+    for _ in range(n):
+        c.get(f"{W}/__scheduled"); time.sleep(4)
+def setpage(name, posts): c.post(f"{M}/_page/{name}", json=posts)
+def buttons(user):
+    return " ".join(json.dumps(e["body"].get("reply_markup", ""), ensure_ascii=False) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == user)
 # ---------------- the agent needs the admin's LLM key first
 clear(); msg(USER, "🤖 ایجنت هوشمند"); settle()
 check("agents inactive until the admin saves an LLM key", any("هنوز فعال نشده" in t for t in sent_to(USER)), str(sent_to(USER)))
-clear(); msg(ADMIN, "🛠 مدیریت"); cb(ADMIN, "ad:llm"); msg(ADMIN, "testkey_LLM123"); settle()
-check("LLM key saved, message deleted, key not echoed", any("کلید هوش مصنوعی ثبت شد" in t for t in sent_to(ADMIN)) and any(e["method"] == "deleteMessage" for e in log()))
-check("LLM key encrypted at rest", "testkey_LLM123" not in d1("SELECT value FROM settings WHERE key='llm_key_enc'"))
+clear(); msg(ADMIN, "🛠 مدیریت"); settle()
+check("admin panel offers the AI settings", "ad:pl:x" in buttons(ADMIN), buttons(ADMIN))
+# custom provider (OpenAI-compatible) pointing at the fake LLM, with a key that has no balance (HTTP 402)
+cb(ADMIN, "ad:pb:custom"); msg(ADMIN, "http://127.0.0.1:9999/llm"); cb(ADMIN, "ad:pm:custom"); msg(ADMIN, "mock-model"); cb(ADMIN, "ad:pk:custom"); msg(ADMIN, "testkey_NOBALANCE"); settle()
+check("key message deleted", any(e["method"] == "deleteMessage" for e in log()))
+check("keys encrypted at rest", "testkey_NOBALANCE" not in d1("SELECT value FROM settings WHERE key LIKE 'llm_key:%'"))
+clear(); cb(ADMIN, "ad:pt:custom"); settle()
+check("test button explains a 402", any("اعتبار حساب تمام شده" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+clear(); msg(USER, "🤖 ایجنت هوشمند"); cb(USER, "ag:new"); msg(USER, "هر روز ساعت ۷ پیام تست بگذار برای من"); msg(USER, "-"); settle()
+check("planner failure shows the real reason", any("اعتبار حساب تمام شده" in t for t in sent_to(USER)), str(sent_to(USER)))
+clear(); cb(USER, "ag:x"); settle()
+# a second provider (OpenRouter preset, base overridden by env for the test) with a working key becomes the automatic fallback
+clear(); cb(ADMIN, "ad:pk:openrouter"); msg(ADMIN, "testkey_LLM123"); cb(ADMIN, "ad:pt:openrouter"); settle()
+check("openrouter test OK", any("کار می‌کند" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+check("first saved provider stays active", d1j("SELECT value FROM settings WHERE key='llm_active'")[0]["value"] == "custom")
 
 # ---------------- create a free-text "good morning" agent
 setpage("goodmorning_ch", [OLD_MORNING, NEW_MORNING])

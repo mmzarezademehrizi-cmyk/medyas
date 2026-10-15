@@ -1,8 +1,10 @@
 import { enc } from "./crypto";
-import { ChannelRow, PostRow, UserRow, clearLlmKey, clearSession, getChannel, getSession, getUser, llmKey, now, saveLlmKey, setSession, touchUser, userChannels } from "./db";
+import { ChannelRow, PostRow, UserRow, clearSession, getChannel, getSession, getUser, now, setSession, touchUser, userChannels } from "./db";
 import * as eitaa from "./eitaa";
 import { Env, adminIds } from "./env";
+import * as adminAi from "./adminai";
 import * as agentUi from "./agentui";
+import { llmChain } from "./providers";
 import { cleanText, fetchChannel } from "./source";
 import { deliver } from "./scheduler";
 import * as tg from "./tg";
@@ -53,7 +55,7 @@ async function onMessage(c: Ctx, m: TgMessage): Promise<void> {
   if (!hasAccess(user, admin) && s.state) { await clearSession(env, uid); return void (await tg.send(env, uid, NO_ACCESS)); }
   switch (s.state) {
     case "token": return gotToken(c, user, m, text);
-    case "llm_key": return admin ? gotLlmKey(c, user, m, text) : undefined;
+    case "ai_key": case "ai_model": case "ai_base": return admin ? adminAi.onText(env, uid, m, s.state, s.data, text) : undefined;
     case "chan_id": return gotChanId(c, user, text);
     case "chan_title": return gotChanTitle(c, user, s.data, text);
     case "chan_rename": return gotRename(c, user, s.data, text);
@@ -148,17 +150,6 @@ async function gotRename(c: Ctx, u: UserRow, d: Record<string, any>, text: strin
   await tg.send(c.env, u.id, "✅ نام تغییر کرد.", mainKb(isAdmin(c.env, u.id)));
 }
 
-// ------------------------------------------------------------------ LLM key (admin)
-async function gotLlmKey(c: Ctx, u: UserRow, m: TgMessage, text: string): Promise<void> {
-  const { env } = c;
-  await tg.del(env, u.id, m.message_id);
-  const key = text.trim();
-  if (!/^[A-Za-z0-9_\-.]{10,200}$/.test(key)) return void (await tg.send(env, u.id, "❌ قالب کلید درست نیست. دوباره بفرستید (یا /cancel)."));
-  await saveLlmKey(env, key);
-  await clearSession(env, u.id);
-  await tg.send(env, u.id, "✅ کلید هوش مصنوعی ثبت شد 🎉\nاز حالا ایجنت‌ها کار می‌کنند.", mainKb(true));
-}
-
 // ------------------------------------------------------------------ new post
 async function newPost(c: Ctx, u: UserRow): Promise<void> {
   const { env } = c;
@@ -242,9 +233,9 @@ async function account(env: Env, u: UserRow, admin: boolean): Promise<void> {
     `🟠 توکن ایتایار: ${u.eitaa_token_enc ? "✅" : "❌"}\n📣 کانال‌ها: ${n}`);
 }
 async function adminPanel(env: Env, uid: number): Promise<void> {
-  const has = !!(await llmKey(env));
-  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + `\n\n🧠 هوش مصنوعی ایجنت: ${has ? "✅ فعال" : "❌ ثبت نشده"}\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code> · <code>/src نام_کانال</code>`,
-    ikb([[[has ? "🔑 تغییر کلید هوش مصنوعی" : "🔑 ثبت کلید هوش مصنوعی", "ad:llm"]], ...(has && !env.LLM_API_KEY ? [[["🗑 حذف کلید", "ad:llmdel"] as Btn]] : [])]));
+  const chain = await llmChain(env);
+  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + `\n\n🧠 هوش مصنوعی ایجنت: ${chain.length ? "✅ " + chain.map((x) => x.name).join(" ← ") : "❌ تنظیم نشده"}\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code> · <code>/src نام_کانال</code>`,
+    ikb([[["🧠 تنظیم هوش مصنوعی", "ad:pl:x"]]]));
 }
 async function adminCmd(env: Env, cmd: string, a: string[]): Promise<string> {
   const id = parseInt(a[0] || "", 10);
@@ -295,11 +286,7 @@ async function onCallback(c: Ctx, q: TgCallback): Promise<void> {
     if (act === "set") { await setSession(env, uid, "token", {}); return void (await tg.send(env, uid, "🔑 توکن ایتایار را بفرستید\n🧹 پیام شما بعد از خواندن پاک می‌شود. لغو: /cancel")); }
     if (act === "del") { await env.DB.prepare("UPDATE users SET eitaa_token_enc='', eitaa_account='' WHERE id=?").bind(uid).run(); return void (await tg.send(env, uid, "🗑 توکن حذف شد.")); }
   }
-  if (kind === "ad" && admin) {
-    await tg.answer(env, q.id);
-    if (act === "llm") { await setSession(env, uid, "llm_key", {}); return void (await tg.send(env, uid, "🔑 کلید API هوش مصنوعی (دیپ‌سیک) را بفرستید\n🧹 پیام شما بعد از خواندن پاک می‌شود. لغو: /cancel")); }
-    if (act === "llmdel") { await clearLlmKey(env); return void (await tg.send(env, uid, "🗑 کلید حذف شد.")); }
-  }
+  if (kind === "ad" && admin) return adminAi.onCallback(env, q, uid, act, arg);
   if (kind === "ag") return agentUi.onCallback(c, user, admin, q, act, arg, s);
   if (kind === "ch") {
     await tg.answer(env, q.id);
