@@ -112,7 +112,7 @@ async function runJob(env: Env, key: string, j: JobRow, slot: Slot, t: number): 
   const final = slot.kind === "manual" || j.attempts + 1 >= 3 || t - slot.epoch > RETRY_WINDOW_S;
   let res: RunResult;
   try { res = await runAgent(env, key, j, slot, final); }
-  catch (e) { res = { summary: `خطا: ${(e as Error).message}`, posts: 0, retryMin: null, error: true }; }
+  catch (e) { res = { summary: (e as Error).message, posts: 0, retryMin: null, error: true }; }
   const retry = !final && res.retryMin ? Math.min(Math.max(res.retryMin, 2), 30) : 0;
   const info = `${fmtDt(now())} — ${res.posts} پست — ${res.summary}`.slice(0, 500);
   if (retry) {

@@ -82,8 +82,9 @@ export async function onText(c: Ctx, user: UserRow, admin: boolean, state: strin
     case "ag_footer": {
       d.footer = text === "-" ? "" : text.slice(0, 500);
       await tg.send(env, uid, "🔎 در حال تحلیل دستور…");
-      const plan = await planJob(env, String(d.instruction));
-      if (!plan) { await setSession(env, uid, "ag_footer", d); return void (await tg.send(env, uid, "❌ سرویس هوش مصنوعی پاسخ نداد. دوباره امضا را بفرستید تا تلاش کنم (یا /cancel).")); }
+      let plan: Plan | null = null, why = "پاسخ قابل‌فهمی نگرفتم";
+      try { plan = await planJob(env, String(d.instruction)); } catch (e) { why = (e as Error).message; }
+      if (!plan) { await setSession(env, uid, "ag_footer", d); return void (await tg.send(env, uid, `❌ ${esc(why)}.\nمشکل که برطرف شد، دوباره امضا را (یا <code>-</code>) بفرستید تا تلاش کنم. لغو: /cancel`)); }
       d.plan = plan;
       if (!plan.times.length && !plan.onceAt) { await setSession(env, uid, "ag_when", d); return void (await tg.send(env, uid, "در دستورتان ساعتی پیدا نکردم.\n" + WHEN_HELP)); }
       return confirm(env, uid, d);
