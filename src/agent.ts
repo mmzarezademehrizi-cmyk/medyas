@@ -125,10 +125,13 @@ async function runJob(env: Env, j: JobRow, slot: Slot, t: number): Promise<void>
 }
 
 // ------------------------------------------------------------------ shared tool: read a public channel
+// Token economy: the model only sees fresh, unused, recent posts with a short preview. To forward a post it passes `from_ref`
+// and the CODE copies the full cleaned text — so long posts are never sent to the model twice nor written back token by token.
 export interface RefInfo { image: string; text: string; sticker: boolean }
 export interface ReadState { channels: Map<string, Awaited<ReturnType<typeof fetchChannel>>>; refs: Map<string, RefInfo> }
+const PREVIEW = 260, PREVIEW_FULL = 1000, MAX_POSTS_SHOWN = 8, MAX_AGE_S = 3 * 86400;
 
-/** The read_channel tool, used by both the scheduled agent and the live chat. `jobId` (if any) marks posts already used by that job. */
+/** The read_channel tool, used by both the scheduled agent and the live chat. `jobId` (if any) hides posts already used by that job. */
 export async function readChannel(env: Env, st: ReadState, a: any, jobId: number | null, maxChannels: number): Promise<unknown> {
   const cid = normalizeChatId(String(a.channel || "")).replace(/^@/, "");
   if (!/^[A-Za-z0-9_.]{3,64}$/.test(cid) || /^\d+$/.test(cid)) return { error: "invalid channel username" };
@@ -136,120 +139,121 @@ export async function readChannel(env: Env, st: ReadState, a: any, jobId: number
   let r = st.channels.get(cid);
   if (!r) { r = await fetchChannel(env, cid); st.channels.set(cid, r); }
   if (!r.ok) return { error: r.note || "could not read channel (is it public?)" };
-  const limit = Math.min(Math.max(parseInt(a.limit, 10) || 12, 1), 20);
-  const msgs = r.messages.slice(-limit).reverse();
+  const limit = Math.min(Math.max(parseInt(a.limit, 10) || MAX_POSTS_SHOWN, 1), 20), cut = a.full ? PREVIEW_FULL : PREVIEW, t = now();
   const seen = jobId === null ? new Set<string>() : new Set((await env.DB.prepare("SELECT k FROM agent_seen WHERE job_id=?").bind(jobId).all<{ k: string }>()).results.map((x) => x.k));
-  return {
-    channel: cid, title: r.title,
-    posts: msgs.map((m) => {
-      const ref = `${cid}/${m.id}`, text = cleanText(m.text, cid, r!.title);
-      st.refs.set(ref, { image: m.image, text, sticker: m.sticker });
-      const d = m.ts ? toLocal(m.ts) : null;
-      return { ref, date: d ? `${d.y}-${pad2(d.mo)}-${pad2(d.d)} ${pad2(d.h)}:${pad2(d.mi)}` : null, text: text.slice(0, 1200), has_image: !!m.image && !m.sticker, has_sticker: m.sticker, has_video: m.video, used: seen.has(ref) };
-    }),
-  };
+  let hidden = 0;
+  const posts: unknown[] = [];
+  for (const m of r.messages.slice().reverse()) {                       // newest first
+    const ref = `${cid}/${m.id}`;
+    if (seen.has(ref) || (m.ts !== null && t - m.ts > MAX_AGE_S)) { hidden++; continue; }
+    const text = cleanText(m.text, cid, r.title);
+    st.refs.set(ref, { image: m.image, text, sticker: m.sticker });
+    if (posts.length >= limit) continue;
+    const d = m.ts ? toLocal(m.ts) : null;
+    posts.push({ ref, ...(d ? { date: `${d.y}-${pad2(d.mo)}-${pad2(d.d)} ${pad2(d.h)}:${pad2(d.mi)}` } : {}), text: text.slice(0, cut) + (text.length > cut ? "…" : ""), ...(m.image && !m.sticker ? { image: 1 } : {}), ...(m.sticker ? { sticker: 1 } : {}) });
+  }
+  return { channel: cid, posts, ...(hidden ? { hidden_old_or_used: hidden } : {}) };
+}
+
+/** Text/sticker/image of a post the model refers to, as the code should publish it. */
+export function resolvePost(st: ReadState, a: any, footer: string): { text: string; image: string; sticker: boolean; refs: string[] } | { error: string } {
+  let text = String(a.text || "").trim();
+  const fromRef = a.from_ref ? String(a.from_ref) : "", imageRef = a.image_ref ? String(a.image_ref) : "";
+  if (fromRef && !text) { const r = st.refs.get(fromRef); if (!r) return { error: "unknown from_ref (use a ref from read_channel)" }; text = r.text; }
+  const ri = imageRef ? st.refs.get(imageRef) : undefined;
+  if (imageRef && !ri?.image) return { error: "image_ref has no image/sticker" };
+  const sticker = !!ri?.sticker;
+  if (sticker) text = "";                                               // a sticker carries no caption, so no signature either
+  if (!text && !ri) return { error: "empty post" };
+  const full = text ? text + (footer ? `\n\n${footer}` : "") : "";
+  if (ri && !sticker && full.length > 1000) return { error: "text+signature too long for a post with image (max 1000 chars): shorten or drop image_ref" };
+  if (full.length > 3900) return { error: "text too long (max ~3900)" };
+  return { text: full, image: ri?.image || "", sticker, refs: [fromRef, imageRef].filter(Boolean) };
 }
 
 // ------------------------------------------------------------------ the agent loop
 interface RunResult { summary: string; posts: number; retryMin: number | null; error?: boolean }
 
+const POST_PARAMS = {
+  text: { type: "string", description: "post text; omit when forwarding a source post via from_ref" },
+  from_ref: { type: "string", description: "ref of a source post: its full cleaned text is used as-is" },
+  image_ref: { type: "string", description: "ref of a source post whose image/sticker to attach" },
+};
 const TOOLS = (final: boolean): ToolDef[] => [
-  { type: "function", function: { name: "read_channel", description: "Read the latest posts of a PUBLIC Eitaa channel (by its @id / username). Returns newest first. Text already has the channel's own signature removed. Posts with used=true were already published by this agent before. Posts may be images (has_image) or stickers (has_sticker).",
-    parameters: { type: "object", properties: { channel: { type: "string", description: "channel username without @" }, limit: { type: "integer", description: "how many posts, default 12, max 20" } }, required: ["channel"] } } },
-  { type: "function", function: { name: "get_current_time", description: "Current date and time in Tehran: Jalali (Persian) date, weekday, Gregorian date, clock.", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "post_to_channel", description: "Publish a post to the owner's channel. The owner's signature is appended automatically — do NOT add a signature yourself. Optionally attach the image (or send the sticker) of a post you read via image_ref; for a sticker leave text empty.",
-    parameters: { type: "object", properties: {
-      text: { type: "string", description: "final post text in Persian (for posts with an image: max 900 chars)" },
-      image_ref: { type: "string", description: "ref of a read post whose image should be attached, e.g. \"channel/123\"" },
-      source_refs: { type: "array", items: { type: "string" }, description: "refs of the posts this one is based on (marks them as used)" },
-      delay_minutes: { type: "integer", description: "publish after this many minutes (0 = now, max 720). Use it to spread several posts." } }, required: ["text"] } } },
-  ...(final ? [] : [{ type: "function" as const, function: { name: "retry_later", description: "Use when the thing the task needs does not exist YET (e.g. today's good-morning post has not been published by the source). The whole task is retried after the given minutes. Only call it if you published nothing in this run.",
+  { type: "function", function: { name: "read_channel", description: "Latest unused posts of a PUBLIC Eitaa channel (@id), newest first, short previews. image/sticker=1 flags media.",
+    parameters: { type: "object", properties: { channel: { type: "string" }, full: { type: "boolean", description: "longer previews (only if you must rewrite)" } }, required: ["channel"] } } },
+  { type: "function", function: { name: "post_to_channel", description: "Publish to the owner's channel (his signature is appended by the system). Call it ONCE per post, all posts in the same step.",
+    parameters: { type: "object", properties: { ...POST_PARAMS, delay_minutes: { type: "integer", description: "0-720; spread several posts" } } } } },
+  ...(final ? [] : [{ type: "function" as const, function: { name: "retry_later", description: "The needed content does not exist YET (e.g. today's post not published). Retry the whole task later. Only if nothing was published.",
     parameters: { type: "object", properties: { minutes: { type: "integer", description: "5-30" }, reason: { type: "string" } }, required: ["minutes", "reason"] } } }]),
-  { type: "function", function: { name: "finish", description: "Call when the task is complete (or when nothing suitable was found). The summary is a short Persian explanation for the owner.",
-    parameters: { type: "object", properties: { summary: { type: "string" } }, required: ["summary"] } } },
 ];
 
 async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promise<RunResult> {
   const ch = await getChannel(env, j.channel_id);
   if (!ch || ch.user_id !== j.user_id) return { summary: "کانال مقصد دیگر وجود ندارد.", posts: 0, retryMin: null, error: true };
-  const t0 = Date.now(), t = now();
-  const recent = (await env.DB.prepare("SELECT text, created_at FROM posts WHERE job_id=? AND created_at>? AND status IN ('pending','draft','sending','sent') ORDER BY id DESC LIMIT 12").bind(j.id, t - 3 * 86400).all<{ text: string; created_at: number }>()).results;
+  const t0 = Date.now(), t = now(), l = toLocal(t);
+  const recent = (await env.DB.prepare("SELECT text FROM posts WHERE job_id=? AND created_at>? AND status IN ('pending','draft','sending','sent') ORDER BY id DESC LIMIT 6").bind(j.id, t - 3 * 86400).all<{ text: string }>()).results;
   const state = { posts: 0, retryMin: null as number | null, summary: "", done: false, channels: new Map<string, Awaited<ReturnType<typeof fetchChannel>>>(), refs: new Map<string, RefInfo>() };
   const recentNorm = new Set(recent.map((r) => norm(r.text).replace(/\s+/g, " ").slice(0, 120)));
 
   const system =
-    `You are an autonomous content agent working for the owner of an Eitaa channel ("${ch.title}"). Do exactly the task the owner wrote, using your tools. Write in Persian.\n\n` +
-    `OWNER'S TASK (verbatim):\n"""\n${j.instruction}\n"""\n\n` +
-    `RULES\n- Today (Tehran): ${jalaliLong(t)} — ${new Date(t * 1000).toISOString().slice(0, 10)}, now ${pad2(toLocal(t).h)}:${pad2(toLocal(t).mi)}. Use get_current_time if you need it.\n` +
-    `- Only use channels the owner named. Never invent posts. When you reuse a source post, keep its meaning and wording; remove the source channel's name, @id, links and "join us" lines (a signature of the owner is added by the system — never add one yourself).\n` +
-    `- Skip advertisements, giveaways, promotions, and anything unrelated to the task. Skip posts with used=true. Do not publish near-duplicates of what was already published (see list below).\n` +
-    `- If the task says "N posts", N is the maximum for this run; publish fewer (or none) rather than bad content. Spread several posts with delay_minutes (e.g. 0, 20, 40...).\n` +
-    `- If the task needs a date, it must be today's date (${jalaliLong(t)}). A source post that shows a different date is NOT acceptable.\n` +
-    (final ? "- This is the LAST attempt: if no suitable source post exists, compose the post yourself according to the task (e.g. a good-morning text with today's date) and publish it.\n"
-           : "- If the content the task depends on is not available yet and you published nothing, call retry_later instead of settling for something worse.\n") +
-    `- Finish by calling finish with a one-sentence Persian summary.\n\n` +
-    `RECENTLY PUBLISHED BY THIS TASK (do not repeat):\n${recent.length ? recent.map((r) => `- ${r.text.replace(/\s+/g, " ").slice(0, 110)}`).join("\n") : "(nothing yet)"}`;
+    `You run a task for an Eitaa channel owner. Reply/write in Persian. Use tools; be brief.\n` +
+    `TASK:\n${j.instruction}\n\n` +
+    `Today (Tehran): ${jalaliLong(t)} | ${l.y}-${pad2(l.mo)}-${pad2(l.d)} ${pad2(l.h)}:${pad2(l.mi)}\n` +
+    `Rules: read only channels named in the task. Never invent posts. To forward a source post use post_to_channel(from_ref) — never retype it; `+
+    `to rewrite, write text yourself (no source names/@ids/links). Skip ads/giveaways/off-topic. No near-duplicates of RECENT. "N posts" = maximum; fewer or none is fine. ` +
+    `Spread several posts with delay_minutes. A required date must be today's; a source post showing another date is unacceptable. ` +
+    (final ? "LAST attempt: if no suitable source post exists, write the post yourself per the task and publish it. " : "If the needed content does not exist yet and you published nothing, call retry_later. ") +
+    `When done with nothing to publish, answer with one short Persian sentence explaining why.\n` +
+    `RECENT:\n${recent.length ? recent.map((r) => `- ${r.text.replace(/\s+/g, " ").slice(0, 70)}`).join("\n") : "(none)"}`;
 
+  let postedThisStep = 0;
   const exec = async (name: string, a: any): Promise<unknown> => {
     switch (name) {
-      case "get_current_time": {
-        const n = now(), l = toLocal(n);
-        return { jalali: jalaliLong(n), gregorian: `${l.y}-${pad2(l.mo)}-${pad2(l.d)}`, time: `${pad2(l.h)}:${pad2(l.mi)}`, timezone: "Asia/Tehran" };
-      }
       case "read_channel": return readChannel(env, state, a, j.id, MAX_CHANNELS_PER_RUN);
       case "post_to_channel": {
         if (state.posts >= MAX_POSTS_PER_RUN) return { error: "post limit for this run reached" };
-        let text = String(a.text || "").trim();
-        const refs: string[] = Array.isArray(a.source_refs) ? a.source_refs.map(String).slice(0, 10) : [];
-        const imageRef = a.image_ref ? String(a.image_ref) : "";
-        const ri = imageRef ? state.refs.get(imageRef) : undefined, img = ri?.image || "", isSticker = !!ri?.sticker;
-        if (imageRef && !img) return { error: "image_ref has no image/sticker (use a ref from read_channel with has_image or has_sticker = true) — publish without image_ref or fix it" };
-        if (isSticker) text = "";   // a sticker carries no caption, so no signature either
-        if (!text && !img) return { error: "empty post" };
-        const full = text ? text + (j.footer ? `\n\n${j.footer}` : "") : isSticker ? "" : (j.footer || "");
-        if (img && full.length > 1000) return { error: "text + signature too long for a post with image (max 1000 chars): shorten it or publish without image_ref" };
-        if (full.length > 3900) return { error: "text too long (max ~3900 chars)" };
-        const sig = norm(text).replace(/\s+/g, " ").slice(0, 120);
-        if (sig && recentNorm.has(sig)) return { error: "duplicate of something this task already published" };
-        const delay = Math.min(Math.max(parseInt(a.delay_minutes, 10) || 0, 0), 720);
-        const draft = !!j.approve;
+        const p = resolvePost(state, a, j.footer);
+        if ("error" in p) return p;
+        const sig = norm(p.text).replace(/\s+/g, " ").slice(0, 120);
+        if (sig && recentNorm.has(sig)) return { error: "duplicate of something already published" };
+        const delay = Math.min(Math.max(parseInt(a.delay_minutes, 10) || 0, 0), 720), draft = !!j.approve;
         const ins = await env.DB.prepare("INSERT INTO posts(user_id,channel_id,kind,text,file_id,file_name,title,silent,pin,view_delete,run_at,status,created_at,src_url,job_id) VALUES(?,?,?,?,'',?,'',0,0,0,?,?,?,?,?)")
-          .bind(j.user_id, j.channel_id, img ? "file" : "text", full, isSticker ? "sticker.webp" : "", now() + delay * 60, draft ? "draft" : "pending", now(), img, j.id).run();
+          .bind(j.user_id, j.channel_id, p.image ? "file" : "text", p.text, p.sticker ? "sticker.webp" : "", now() + delay * 60, draft ? "draft" : "pending", now(), p.image, j.id).run();
         const postId = ins.meta.last_row_id as number;
-        recentNorm.add(sig);
-        state.posts++;
-        const keys = [...new Set([...refs, ...(imageRef ? [imageRef] : [])])].filter((k) => /^[A-Za-z0-9_.]+\/\d+$/.test(k));
+        recentNorm.add(sig); state.posts++; postedThisStep++;
+        const keys = [...new Set(p.refs)].filter((k) => /^[A-Za-z0-9_.]+\/\d+$/.test(k));
         if (keys.length) await env.DB.batch(keys.map((k) => env.DB.prepare("INSERT OR IGNORE INTO agent_seen(job_id,k,seen_at) VALUES(?,?,?)").bind(j.id, k, now())));
-        if (draft) await tg.send(env, j.user_id, `📝 <b>پیش‌نویس ایجنت «${esc(j.name)}»</b> (#${postId})${img ? " 🖼" : ""}\n\n${esc(full.slice(0, 1500))}`,
-          ikb([[["✅ انتشار", `ag:go:${postId}`], ["🗑 حذف", `ag:no:${postId}`]]] as Btn[][]));
-        return { ok: true, post_id: postId, status: draft ? "waiting for owner approval" : delay ? `scheduled in ${delay} min` : "queued for sending now" };
+        if (draft) await tg.send(env, j.user_id, `📝 <b>پیش‌نویس ایجنت «${esc(j.name)}»</b> (#${postId})${p.image ? " 🖼" : ""}\n\n${esc(p.text.slice(0, 1500))}`, ikb([[["✅ انتشار", `ag:go:${postId}`], ["🗑 حذف", `ag:no:${postId}`]]] as Btn[][]));
+        return { ok: true, post_id: postId };
       }
       case "retry_later": {
-        if (final) return { error: "not allowed in the last attempt — publish something now" };
+        if (final) return { error: "not allowed in the last attempt — publish now" };
         if (state.posts) return { error: "you already published in this run" };
         state.retryMin = Math.min(Math.max(parseInt(a.minutes, 10) || 10, 5), 30);
         state.summary = String(a.reason || "").slice(0, 300);
         state.done = true;
         return { ok: true };
       }
-      case "finish": state.summary = String(a.summary || "").slice(0, 400); state.done = true; return { ok: true };
     }
     return { error: `unknown tool ${name}` };
   };
 
-  const messages: ChatMsg[] = [{ role: "system", content: system }, { role: "user", content: "Start the task now." }];
+  const messages: ChatMsg[] = [{ role: "system", content: system }, { role: "user", content: "Go." }];
   const tools = TOOLS(final);
   for (let step = 0; step < MAX_STEPS && !state.done; step++) {
     if (Date.now() - t0 > RUN_BUDGET_MS) { state.summary ||= "زمان اجرا تمام شد."; break; }
-    const m = await chatTools(env, messages, tools);
+    const m = await chatTools(env, messages, tools, 45_000, 900);
     messages.push(m);
     if (!m.tool_calls?.length) { state.summary ||= (m.content || "").trim().slice(0, 400); break; }
+    postedThisStep = 0;
     for (const c of m.tool_calls) {
       let out: unknown;
       try { out = await exec(c.function.name, JSON.parse(c.function.arguments || "{}")); }
       catch (e) { out = { error: (e as Error).message }; }
-      messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify(out).slice(0, 30_000) });
+      messages.push({ role: "tool", tool_call_id: c.id, content: JSON.stringify(out).slice(0, 12_000) });
     }
+    if (postedThisStep > 0) { state.done = true; state.summary ||= `${state.posts} پست ساخته شد.`; }   // no extra "wrap-up" call: it would only cost tokens
   }
   if (!state.summary) state.summary = state.posts ? "انجام شد." : "کاری انجام نشد.";
   return { summary: state.summary, posts: state.posts, retryMin: state.retryMin };

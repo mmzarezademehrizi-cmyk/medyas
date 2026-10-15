@@ -1,7 +1,7 @@
 // OpenAI-compatible chat client used by the agent. It walks the provider chain (active first): if one fails because of quota,
 // balance, an invalid key, a rate limit or an outage, the next configured provider is tried automatically.
 import { Env } from "./env";
-import { LlmCfg, llmChain } from "./providers";
+import { LlmCfg, llmChain, markCooldown } from "./providers";
 
 export interface ToolDef { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export interface ChatMsg { role: "system" | "user" | "assistant" | "tool"; content?: string | null; name?: string; tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[]; tool_call_id?: string }
@@ -31,7 +31,7 @@ export async function callOne(cfg: LlmCfg, body: Record<string, unknown>, timeou
       if (!r.ok) {
         console.error("llm http", cfg.id, r.status);
         if ((r.status === 429 || r.status >= 500) && attempt === 0) { await sleep(4000); continue; }
-        throw new Error(httpReason(r.status));
+        throw Object.assign(new Error(httpReason(r.status)), { status: r.status });
       }
       const j: any = await r.json();
       if (j?.error) throw new Error(String(j.error.message || "خطای نامشخص از سرویس").slice(0, 160));
@@ -49,7 +49,13 @@ async function viaChain<T>(env: Env, fn: (cfg: LlmCfg) => Promise<T>): Promise<T
   if (!chain.length) throw new Error("هنوز هیچ سرویس هوش مصنوعی تنظیم نشده است");
   const errs: string[] = [];
   for (const cfg of chain) {
-    try { return await fn(cfg); } catch (e) { errs.push(`${cfg.name}: ${(e as Error).message}`); }
+    try { return await fn(cfg); } catch (e) {
+      errs.push(`${cfg.name}: ${(e as Error).message}`);
+      const st = (e as { status?: number }).status;   // quota / balance / key problems: don't hammer this provider again for a while
+      if (st === 429) await markCooldown(env, cfg.id, 10 * 60).catch(() => {});
+      else if (st === 402 || st === 401 || st === 403) await markCooldown(env, cfg.id, 30 * 60).catch(() => {});
+      else if (st && st >= 500) await markCooldown(env, cfg.id, 2 * 60).catch(() => {});
+    }
   }
   throw new Error(errs.join(" | "));
 }
@@ -69,12 +75,12 @@ export function chatJson(env: Env, system: string, user: string, maxTokens = 150
 }
 
 /** One step of a tool-calling conversation (OpenAI-compatible function calling). */
-export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[], timeoutMs = 45_000): Promise<ChatMsg> {
+export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[], timeoutMs = 45_000, maxTokens = 900): Promise<ChatMsg> {
   return viaChain(env, async (cfg) => {
     const msgs = cfg.id === "gemini"   // Gemini's compatibility layer wants the tool name on tool results
       ? messages.map((m) => (m.role === "tool" ? { ...m, name: messages.flatMap((x) => x.tool_calls || []).find((c) => c.id === m.tool_call_id)?.function.name } : m))
       : messages;
-    const j = await callOne(cfg, { temperature: 0.3, max_tokens: 2500, messages: msgs, tools, tool_choice: "auto" }, timeoutMs);
+    const j = await callOne(cfg, { temperature: 0.3, max_tokens: maxTokens, messages: msgs, tools, tool_choice: "auto" }, timeoutMs);
     const m = j?.choices?.[0]?.message;
     if (!m) throw new Error("پاسخ نامعتبر");
     const calls = (m.tool_calls || []).map((c: any, i: number) => ({ ...c, id: c.id || `call_${Date.now().toString(36)}_${i}`, type: "function" }));
@@ -82,9 +88,14 @@ export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[], timeo
   });
 }
 
-/** Tiny round-trip used by the admin's "test" button. */
+/** Admin "test" button: a plain reply AND a tool call (the agent needs tools; not every free model supports them). */
 export async function testProvider(cfg: LlmCfg): Promise<string> {
-  const j = await callOne(cfg, { temperature: 0, max_tokens: 20, messages: [{ role: "user", content: "Reply with the single word: OK" }] }, 30_000);
-  const t = String(j?.choices?.[0]?.message?.content || "").trim();
-  return t ? t.slice(0, 40) : "(پاسخ خالی)";
+  const j = await callOne(cfg, {
+    temperature: 0, max_tokens: 60, tool_choice: "auto",
+    messages: [{ role: "user", content: "Call the function ping with value 1." }],
+    tools: [{ type: "function", function: { name: "ping", description: "ping", parameters: { type: "object", properties: { value: { type: "integer" } }, required: ["value"] } } }],
+  }, 30_000);
+  const m = j?.choices?.[0]?.message;
+  if (m?.tool_calls?.length) return "اتصال ✅ و ابزار (function calling) ✅";
+  return `اتصال ✅ ولی این مدل ابزار را صدا نزد ⚠️ (برای ایجنت مدل دیگری انتخاب کنید): ${String(m?.content || "").slice(0, 40)}`;
 }

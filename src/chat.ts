@@ -1,6 +1,6 @@
 // Live conversation with the agent inside the bot: the owner talks, the agent acts right away with real tools
 // (read a public channel, send to his channel and wait for the real delivery result, schedule) and reports what actually happened.
-import { RefInfo, readChannel } from "./agent";
+import { RefInfo, readChannel, resolvePost } from "./agent";
 import { ChannelRow, UserRow, getSession, now, setSession, userChannels } from "./db";
 import { Env } from "./env";
 import { ChatMsg, ToolDef, chatTools } from "./llm";
@@ -15,7 +15,7 @@ type Ctx = { env: Env; wait: (p: Promise<unknown>) => void };
 const MAX_STEPS = 6;
 const BUDGET_MS = 42_000;
 const STEP_TIMEOUT_MS = 20_000;
-const HIST_KEEP = 10;
+const HIST_KEEP = 6;
 
 const INTRO = "💬 <b>گفتگوی زنده با ایجنت</b>\n\nهر چه می‌خواهید بنویسید؛ همان لحظه انجام می‌دهد و نتیجه‌ی واقعی را می‌گوید. مثلاً:\n" +
   "• <i>برای تست یک «سلام» توی کانالم بفرست</i>\n• <i>از کانال @name آخرین پست‌ها را نشانم بده</i>\n• <i>از @name یک استیکر تقویم پیدا کن و بفرست</i>\n• <i>فردا ساعت ۹ این متن را بگذار: …</i>\n\n" +
@@ -30,13 +30,11 @@ export async function start(env: Env, u: UserRow): Promise<void> {
 }
 
 const TOOLS: ToolDef[] = [
-  { type: "function", function: { name: "list_channels", description: "List the owner's own channels (the ones you can post to).", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "get_current_time", description: "Current date/time in Tehran (Jalali date, weekday, clock).", parameters: { type: "object", properties: {} } } },
-  { type: "function", function: { name: "read_channel", description: "Read the latest posts of a PUBLIC Eitaa channel by its @id. Newest first. Each post has a ref, text, has_image, has_sticker.",
-    parameters: { type: "object", properties: { channel: { type: "string" }, limit: { type: "integer", description: "default 12, max 20" } }, required: ["channel"] } } },
-  { type: "function", function: { name: "post_to_channel", description: "Send a post to one of the owner's channels RIGHT NOW and wait for the real result: {status:'sent'} or {status:'failed', error}. Optionally attach the image — or send the sticker — of a post you read (image_ref); for a sticker leave text empty.",
-    parameters: { type: "object", properties: { text: { type: "string" }, image_ref: { type: "string", description: "ref from read_channel, e.g. \"name/123\"" }, channel_id: { type: "integer", description: "id from list_channels (optional if the owner has one channel)" } }, required: ["text"] } } },
-  { type: "function", function: { name: "schedule_post", description: "Schedule a text post for later. `when` examples: \"18:30\", \"فردا 09:00\", \"+45\" (minutes from now), \"1405/07/20 18:30\" (Tehran time).",
+  { type: "function", function: { name: "read_channel", description: "Latest posts of a PUBLIC Eitaa channel (@id), newest first, short previews (ref, text; image/sticker=1).",
+    parameters: { type: "object", properties: { channel: { type: "string" } }, required: ["channel"] } } },
+  { type: "function", function: { name: "post_to_channel", description: "Send a post to one of his channels NOW (real result is returned). To forward a source post pass from_ref (full text copied by the system) and/or image_ref (image or sticker; for a sticker omit text).",
+    parameters: { type: "object", properties: { text: { type: "string" }, from_ref: { type: "string" }, image_ref: { type: "string" }, channel_id: { type: "integer", description: "optional if he has one channel" } } } } },
+  { type: "function", function: { name: "schedule_post", description: "Schedule a text post. when: \"18:30\", \"فردا 09:00\", \"+45\" (minutes), \"1405/07/20 18:30\" (Tehran).",
     parameters: { type: "object", properties: { text: { type: "string" }, when: { type: "string" }, channel_id: { type: "integer" } }, required: ["text", "when"] } } },
 ];
 
@@ -55,13 +53,9 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
   const st = { channels: new Map<string, Awaited<ReturnType<typeof fetchChannel>>>(), refs: new Map<string, RefInfo>() };
   const tnow = now(), l = toLocal(tnow);
   const system =
-    `You are the LIVE assistant of the owner of Eitaa channel(s), chatting with him in Persian inside a Telegram bot. You can act for real with your tools.\n` +
-    `LIVE CHAT RULES\n- When he clearly asks for an action (send a message, test message, read a channel, send a sticker…), DO IT NOW with the tools — do not ask for confirmation. Ask ONE short question only if something essential is missing (which channel, what text).\n` +
-    `- Post exactly the text he asked for (e.g. "send سلام" → text "سلام"). Never add a signature unless asked.\n` +
-    `- After acting, answer briefly and truthfully using the tool result: say it was sent, or that it failed and why. NEVER claim success if the tool returned failed or an error.\n` +
-    `- You can only read PUBLIC channels he names (no global search). Posts have has_image / has_sticker; to forward a sticker or image use post_to_channel with image_ref.\n` +
-    `- If a source post contains the source channel's name/@id/links, remove them from text you forward.\n` +
-    `- Today (Tehran): ${jalaliLong(tnow)} — ${l.y}-${pad2(l.mo)}-${pad2(l.d)}, ${pad2(l.h)}:${pad2(l.mi)}.\n` +
+    `LIVE CHAT RULES. You are the live assistant of an Eitaa channel owner; chat in Persian, briefly. Act with tools immediately when he clearly asks (send, test message, read a channel, forward a sticker…); ask ONE short question only if something essential is missing. ` +
+    `Post exactly the text he asks, no signature unless asked. Only PUBLIC channels he names can be read (no global search). Use from_ref/image_ref to forward posts instead of retyping. ` +
+    `Today (Tehran): ${jalaliLong(tnow)} | ${l.y}-${pad2(l.mo)}-${pad2(l.d)} ${pad2(l.h)}:${pad2(l.mi)}\n` +
     `HIS CHANNELS: ${chans.map((x) => `id=${x.id} «${x.title}» (@${x.chat_id})`).join("; ")}`;
   const hist: { r: "u" | "a"; t: string }[] = Array.isArray(data.hist) ? data.hist : [];
   const messages: ChatMsg[] = [{ role: "system", content: system }, ...hist.map((h) => ({ role: h.r === "u" ? "user" : "assistant", content: h.t }) as ChatMsg), { role: "user", content: text }];
@@ -74,34 +68,33 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
     (await env.DB.prepare("INSERT INTO posts(user_id,channel_id,kind,text,file_id,file_name,title,silent,pin,view_delete,run_at,status,created_at,src_url) VALUES(?,?,?,?,'',?,'',0,0,0,?,'pending',?,?)")
       .bind(uid, ch.id, kind, body, name, runAt, now(), file).run()).meta.last_row_id as number;
 
+  const notes: string[] = [];   // outcome lines written by the code itself (truthful, and no extra LLM round-trip)
   const exec = async (name: string, a: any): Promise<unknown> => {
     switch (name) {
-      case "list_channels": return chans.map((x) => ({ id: x.id, title: x.title, username: x.chat_id }));
-      case "get_current_time": { const n = now(), q = toLocal(n); return { jalali: jalaliLong(n), gregorian: `${q.y}-${pad2(q.mo)}-${pad2(q.d)}`, time: `${pad2(q.h)}:${pad2(q.mi)}` }; }
       case "read_channel": { await show(`🔎 در حال خواندن @${esc(String(a.channel || ""))}…`); return readChannel(env, st, a, null, 4); }
       case "post_to_channel": {
         const ch = pick(a.channel_id);
         if (typeof ch === "string") return { status: "failed", error: ch };
-        const ri = a.image_ref ? st.refs.get(String(a.image_ref)) : undefined;
-        if (a.image_ref && !ri?.image) return { status: "failed", error: "image_ref has no image/sticker" };
-        const body = ri?.sticker ? "" : String(a.text || "").trim();
-        if (!body && !ri) return { status: "failed", error: "empty text" };
-        if (body.length > (ri ? 1000 : 3900)) return { status: "failed", error: ri ? "caption too long (max 1000 chars)" : "text too long" };
+        const p = resolvePost(st, a, "");
+        if ("error" in p) return { status: "failed", error: p.error };
         await show(`📤 در حال ارسال به «${esc(ch.title)}»…`);
-        const id = await insert(ch, ri ? "file" : "text", body, ri?.image || "", ri?.sticker ? "sticker.webp" : "", now());
+        const id = await insert(ch, p.image ? "file" : "text", p.text, p.image, p.sticker ? "sticker.webp" : "", now());
         await deliver(env, id, true);
         const r = await env.DB.prepare("SELECT status, error FROM posts WHERE id=?").bind(id).first<{ status: string; error: string }>();
-        return r?.status === "sent" ? { status: "sent", post_id: id, channel: ch.title } : { status: "failed", error: r?.error || "unknown error" };
+        const ok = r?.status === "sent";
+        notes.push(ok ? `✅ ${p.sticker ? "استیکر" : "پیام"} در «${esc(ch.title)}» ارسال شد.` : `❌ ارسال به «${esc(ch.title)}» نشد: ${esc(r?.error || "خطای نامشخص")}`);
+        return ok ? { status: "sent" } : { status: "failed", error: r?.error || "unknown error" };
       }
       case "schedule_post": {
         const ch = pick(a.channel_id);
         if (typeof ch === "string") return { status: "failed", error: ch };
         const at = parseWhen(String(a.when || ""));
         const body = String(a.text || "").trim();
-        if (at === null) return { status: "failed", error: "invalid or past time; use formats like 18:30, فردا 09:00, +45, 1405/07/20 18:30" };
+        if (at === null) return { status: "failed", error: "invalid or past time; use 18:30, فردا 09:00, +45, 1405/07/20 18:30" };
         if (!body || body.length > 3900) return { status: "failed", error: "empty or too long text" };
-        const id = await insert(ch, "text", body, "", "", at);
-        return { status: "scheduled", post_id: id, at: fmtDt(at), channel: ch.title };
+        await insert(ch, "text", body, "", "", at);
+        notes.push(`⏰ برای ${fmtDt(at)} (وقت تهران) در «${esc(ch.title)}» زمان‌بندی شد.`);
+        return { status: "scheduled" };
       }
     }
     return { error: `unknown tool ${name}` };
@@ -111,20 +104,24 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       if (Date.now() - t0 > BUDGET_MS) { answer = "⏱ زمان این درخواست تمام شد؛ اگر کار کامل نشد دوباره بگویید."; break; }
-      const r = await chatTools(env, messages, TOOLS, STEP_TIMEOUT_MS);
+      const r = await chatTools(env, messages, TOOLS, STEP_TIMEOUT_MS, 700);
       messages.push(r);
-      if (!r.tool_calls?.length) { answer = (r.content || "").trim(); break; }
+      if (!r.tool_calls?.length) { answer = esc((r.content || "").trim()); break; }
+      let onlyActions = true;
       for (const call of r.tool_calls) {
+        if (call.function.name === "read_channel") onlyActions = false;
         let out: unknown;
         try { out = await exec(call.function.name, JSON.parse(call.function.arguments || "{}")); } catch (e) { out = { error: (e as Error).message }; }
-        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(out).slice(0, 25_000) });
+        messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(out).slice(0, 12_000) });
       }
+      // after publishing/scheduling the code reports the real outcome itself — no extra LLM call, no chance of a wrong "done"
+      if (onlyActions && notes.length) { answer = (r.content ? esc(r.content.trim()) + "\n" : "") + notes.join("\n"); break; }
     }
   } catch (e) { failedWhy = (e as Error).message; }
 
-  const final = failedWhy ? `❌ ${esc(failedWhy)}` : esc(answer || "انجام شد.");
+  const final = failedWhy ? `❌ ${esc(failedWhy)}` : (notes.length && !answer.includes(notes[0]) ? [answer, ...notes] : [answer || "انجام شد."]).filter(Boolean).join("\n");
   if (mid) await tg.edit(env, uid, mid, final.slice(0, 4000)); else await tg.send(env, uid, final);
-  const keep = [...hist, { r: "u" as const, t: text.slice(0, 600) }, { r: "a" as const, t: (failedWhy ? `(خطا: ${failedWhy})` : answer).slice(0, 600) }].slice(-HIST_KEEP);
+  const keep = [...hist, { r: "u" as const, t: text.slice(0, 300) }, { r: "a" as const, t: (failedWhy ? `(خطا: ${failedWhy})` : notes.length ? notes.join(" ") : answer).replace(/<[^>]+>/g, "").slice(0, 300) }].slice(-HIST_KEEP);
   const cur = await getSession(env, uid);
   if (cur.state === "chat") await setSession(env, uid, "chat", { hist: keep, last_mid: m.message_id, busy_until: 0 });
 }

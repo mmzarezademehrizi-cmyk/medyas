@@ -162,7 +162,8 @@ check("planner failure shows the real reason", any("اعتبار حساب تما
 clear(); cb(USER, "ag:x"); settle()
 # a second provider (OpenRouter preset, base overridden by env for the test) with a working key becomes the automatic fallback
 clear(); cb(ADMIN, "ad:pk:openrouter"); msg(ADMIN, "testkey_LLM123"); cb(ADMIN, "ad:pt:openrouter"); settle()
-check("openrouter test OK", any("کار می‌کند" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+check("openrouter test OK incl. tool calling", any("function calling" in t and "✅" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+check("provider that returned 402 rests on a cooldown", int(d1j("SELECT value FROM settings WHERE key='llm_cool:custom'")[0]["value"]) > time.time(), "no cooldown")
 check("first saved provider stays active", d1j("SELECT value FROM settings WHERE key='llm_active'")[0]["value"] == "custom")
 
 # ---------------- create a free-text "good morning" agent
@@ -194,7 +195,7 @@ d1("DELETE FROM agent_seen")
 clear(); tick(1)
 row = d1j(f"SELECT * FROM agent_jobs WHERE id={J1}")[0]
 check("yesterday's poster is rejected and a retry is scheduled", not eitaa_calls("sendFile") and not eitaa_calls("sendMessage") and row["retry_at"] and row["attempts"] == 1 and row["last_key"] == "2000-01-01 00:00", str(row))
-setpage("goodmorning_ch", [OLD_MORNING, {**NEW_MORNING, "id": 12, "image": None}])
+setpage("goodmorning_ch", [OLD_MORNING, {**NEW_MORNING, "id": 12, "image": None, "text": f"🌞 صبح بخیر\n{TODAY}\nسلامتی و شادی برای شما\n\n🆔 @goodmorning_ch"}])
 d1(f"UPDATE agent_jobs SET retry_at=0 WHERE id={J1}")
 clear(); tick(2)
 em = eitaa_calls("sendMessage")
@@ -235,7 +236,7 @@ clear(); cb(USER, f"ag:run:{J2}"); tick(1)
 check("third run: nothing new -> owner told why, no new post", len(d1j(f"SELECT id FROM posts WHERE job_id={J2}")) == 3 and any("مناسب" in t for t in sent_to(USER)), str(sent_to(USER)))
 
 # ---------------- manual approval mode
-cb(USER, f"ag:ap:{J2}"); d1("DELETE FROM agent_seen"); d1(f"UPDATE posts SET run_at=run_at-7200 WHERE job_id={J2}")
+cb(USER, f"ag:ap:{J2}"); d1("DELETE FROM agent_seen"); setpage("sport_ch", [sp(40, "ورزش جدید برای تقویت عضلات"), sp(41, "فوتبال: گزارش بازی دیشب")]); d1(f"UPDATE posts SET run_at=run_at-7200 WHERE job_id={J2}")
 clear(); cb(USER, f"ag:run:{J2}"); tick(1)
 drafts = d1j(f"SELECT id FROM posts WHERE job_id={J2} AND status='draft'")
 check("approval mode: drafts waiting + approve buttons sent", len(drafts) >= 1 and "ag:go:" in buttons(USER), str(drafts))
@@ -261,7 +262,9 @@ clear(); msg(USER, "برای تست یک سلام توی کانالم بفرست
 em = eitaa_calls("sendMessage")
 edits = [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "editMessageText"]
 check("chat sent the message for real", len(em) == 1 and em[0]["form"]["text"] == "سلام", str(em))
-check("chat reports success in one reply, without the extra delivery notice", any("فرستادم" in t for t in edits) and not any("✅ پست #" in t for t in sent_to(USER)), str((edits, sent_to(USER))))
+check("chat reports success in one reply, without the extra delivery notice", any("ارسال شد" in t for t in edits) and not any("✅ پست #" in t for t in sent_to(USER)), str((edits, sent_to(USER))))
+llm_calls = [e for e in log() if e["svc"] == "llm"]
+check("sending one message costs a single LLM call", len(llm_calls) == 1, str(llm_calls))
 clear(); mid = uid[0] + 500
 post({"message": {"message_id": mid, "from": {"id": USER, "first_name": "u2"}, "chat": {"id": USER, "type": "private"}, "text": "یک سلام بفرست"}}); chat_wait()
 post({"message": {"message_id": mid, "from": {"id": USER, "first_name": "u2"}, "chat": {"id": USER, "type": "private"}, "text": "یک سلام بفرست"}}); chat_wait()

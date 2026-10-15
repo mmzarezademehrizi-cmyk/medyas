@@ -93,51 +93,49 @@ async def llm(req):
     if req.headers.get("authorization") != "Bearer testkey_LLM123":
         return web.json_response({"error": "bad key"}, status=401)
     msgs, tools = body["messages"], body.get("tools")
+    LOG.append({"svc": "llm", "tools": bool(tools), "n": len(msgs), "max_tokens": body.get("max_tokens")})
+    if tools and msgs[0]["role"] != "system":      # admin "test" button: expects a tool call
+        return reply(calls=[tool_call(0, "ping", {"value": 1})])
     system = msgs[0]["content"]
-    LOG.append({"svc": "llm", "tools": bool(tools), "n": len(msgs)})
     if "LIVE CHAT RULES" in system:
         return live_chat(msgs, system)
     if not tools:      # planner
         instr = msgs[-1]["content"]
         times = ["07:00"] if ("۷" in instr or "7" in instr) else (["09:00", "14:00"] if "۹ و ۱۴" in instr else [])
         return reply(json.dumps({"name": "ایجنت تست", "times": times, "days": None, "once": None, "summary": "خلاصه‌ی تست"}, ensure_ascii=False))
-    # --- agent loop: decide the next step from what has been called already
+    # --- scheduled agent: decide the next step from what has been called already
     names = {c["id"]: c["function"]["name"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
     results = {names[m["tool_call_id"]]: json.loads(m["content"]) for m in msgs if m["role"] == "tool"}
     called = list(names.values())
-    task = system.split('"""')[1]
+    task = system.split("TASK:\n")[1].split("\n\nToday")[0]
+    mt = re.search(r"Today \(Tehran\): (\S+) (.+?) \|", system)
+    weekday, jal = mt.group(1), mt.group(2)                  # e.g. "شنبه", "۲۳ مهر ۱۴۰۵"
     can_retry = any(t["function"]["name"] == "retry_later" for t in tools)
+    posts = results.get("read_channel", {}).get("posts", [])
     if "صبح" in task:
         if not called:
-            return reply(calls=[tool_call(1, "get_current_time", {}), tool_call(2, "read_channel", {"channel": "goodmorning_ch"})])
-        if "post_to_channel" not in called and "retry_later" not in called:
-            jal = results["get_current_time"]["jalali"].split(" ", 1)[1]          # "۲۳ مهر ۱۴۰۵" without the weekday
-            hit = [p for p in results["read_channel"].get("posts", []) if "صبح بخیر" in p["text"] and jal in p["text"] and not p["used"]]
-            if hit:
-                p = hit[0]
-                return reply(calls=[tool_call(3, "post_to_channel", {"text": p["text"], "image_ref": p["ref"] if p["has_image"] else None, "source_refs": [p["ref"]]})])
-            if can_retry:
-                return reply(calls=[tool_call(3, "retry_later", {"minutes": 10, "reason": "پست امروز هنوز نیامده"})])
-            return reply(calls=[tool_call(3, "post_to_channel", {"text": "🌞 صبح بخیر\n" + results["get_current_time"]["jalali"]})])
-        return reply(calls=[tool_call(4, "finish", {"summary": "پیام صبح بخیر امروز منتشر شد."})])
+            return reply(calls=[tool_call(1, "read_channel", {"channel": "goodmorning_ch"})])
+        hit = [p for p in posts if "صبح بخیر" in p["text"] and jal in p["text"]]
+        if hit:
+            p = hit[0]
+            return reply(calls=[tool_call(3, "post_to_channel", {"from_ref": p["ref"], **({"image_ref": p["ref"]} if p.get("image") else {})})])
+        if can_retry:
+            return reply(calls=[tool_call(3, "retry_later", {"minutes": 10, "reason": "پست امروز هنوز نیامده"})])
+        return reply(calls=[tool_call(3, "post_to_channel", {"text": "🌞 صبح بخیر\n" + weekday + " " + jal})])
     if "استیکر" in task:
         if not called:
             return reply(calls=[tool_call(1, "read_channel", {"channel": "sticker_ch"})])
-        if "post_to_channel" not in called:
-            st = [p for p in results["read_channel"]["posts"] if p["has_sticker"] and not p["used"]]
-            if not st:
-                return reply(calls=[tool_call(5, "finish", {"summary": "استیکری پیدا نشد."})])
-            return reply(calls=[tool_call(7, "post_to_channel", {"text": "", "image_ref": st[0]["ref"], "source_refs": [st[0]["ref"]]})])
-        return reply(calls=[tool_call(8, "finish", {"summary": "استیکر فرستاده شد."})])
+        st = [p for p in posts if p.get("sticker")]
+        if not st:
+            return reply(content="استیکری پیدا نشد.")
+        return reply(calls=[tool_call(7, "post_to_channel", {"image_ref": st[0]["ref"]})])
     if "ورزش" in task:
         if not called:
             return reply(calls=[tool_call(1, "read_channel", {"channel": "sport_ch"})])
-        if "post_to_channel" not in called:
-            good = [p for p in results["read_channel"]["posts"] if ("فوتبال" in p["text"] or "ورزش" in p["text"]) and "تبلیغ" not in p["text"] and not p["used"]][:2]
-            if not good:
-                return reply(calls=[tool_call(5, "finish", {"summary": "مطلب مناسب جدیدی نبود."})])
-            return reply(calls=[tool_call(10 + i, "post_to_channel", {"text": p["text"], "source_refs": [p["ref"]], "delay_minutes": 20 * i}) for i, p in enumerate(good)])
-        return reply(calls=[tool_call(6, "finish", {"summary": "مطالب ورزشی منتشر شد."})])
+        good = [p for p in posts if ("فوتبال" in p["text"] or "ورزش" in p["text"]) and "تبلیغ" not in p["text"]][:2]
+        if not good:
+            return reply(content="مطلب مناسب جدیدی نبود.")
+        return reply(calls=[tool_call(10 + i, "post_to_channel", {"from_ref": p["ref"], "delay_minutes": 20 * i}) for i, p in enumerate(good)])
     return reply(content="کاری برای انجام نبود.")
 
 
@@ -146,15 +144,11 @@ def live_chat(msgs, system):
     names = {c["id"]: c["function"]["name"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
     results = {names[m["tool_call_id"]]: json.loads(m["content"]) for m in msgs if m["role"] == "tool"}
     called = list(names.values())
-    # the current turn's tool calls are everything after the last user message
-    if "post_to_channel" in called:
-        r = results["post_to_channel"]
-        return reply(content=("فرستادم ✅ (" + r["channel"] + ")") if r["status"] == "sent" else ("نشد ❌: " + r["error"]))
     if "استیکر" in utext:
         if "read_channel" not in called:
             return reply(calls=[tool_call(1, "read_channel", {"channel": "sticker_ch"})])
-        st = [p for p in results["read_channel"]["posts"] if p["has_sticker"]]
-        return reply(calls=[tool_call(2, "post_to_channel", {"text": "", "image_ref": st[0]["ref"]})])
+        st = [p for p in results["read_channel"]["posts"] if p.get("sticker")]
+        return reply(calls=[tool_call(2, "post_to_channel", {"image_ref": st[0]["ref"]})])
     if "سلام" in utext:
         args = {"text": "سلام"}
         mm = re.search(r"id=(\d+) «خراب»", system)
