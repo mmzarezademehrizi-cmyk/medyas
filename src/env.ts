@@ -1,5 +1,7 @@
 export interface Env {
   DB: D1Database;
+  AI?: { run(model: string, input: Record<string, unknown>): Promise<any> };   // Workers AI binding: free, no API key needed
+  DISABLE_WORKERS_AI?: string;   // set to 1 to ignore the Workers AI binding
   BOT_TOKEN: string;
   SECRET_KEY: string;
   WEBHOOK_SECRET: string;

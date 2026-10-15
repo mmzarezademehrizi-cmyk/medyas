@@ -15,7 +15,7 @@ export const PROVIDERS: Record<ProviderId, ProviderInfo> = {
   openrouter: { name: "OpenRouter", base: "https://openrouter.ai/api/v1", model: "openrouter/free", cost: "🆓 مدل‌های :free (۵۰ درخواست در روز؛ با ۱۰ دلار شارژ ۱۰۰۰)", keyUrl: "openrouter.ai/keys", json: false },
   mistral: { name: "Mistral", base: "https://api.mistral.ai/v1", model: "mistral-small-latest", cost: "🆓 سطح Experiment (داده‌ها برای آموزش مدل استفاده می‌شود)", keyUrl: "console.mistral.ai/api-keys", json: true },
   github: { name: "GitHub Models", base: "https://models.github.ai/inference", model: "openai/gpt-4.1-mini", cost: "🆓 رایگان با حساب گیت‌هاب (توکن شخصی با دسترسی models)", keyUrl: "github.com/settings/personal-access-tokens", json: true },
-  cloudflare: { name: "Cloudflare Workers AI", base: "", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", cost: "🆓 ۱۰ هزار Neuron در روز (در حساب Cloudflare خودتان)", keyUrl: "dash.cloudflare.com ← AI ← Workers AI", json: false },
+  cloudflare: { name: "Cloudflare Workers AI", base: "", model: "@cf/meta/llama-3.3-70b-instruct-fp8-fast", cost: "🆓 بدون هیچ کلیدی: ۱۰ هزار Neuron در روز از خود حساب Cloudflare شما", keyUrl: "dash.cloudflare.com ← AI ← Workers AI", json: false },
   deepseek: { name: "DeepSeek", base: "https://api.deepseek.com", model: "deepseek-chat", cost: "💳 پولی (حساب جدید اعتبار ندارد)", keyUrl: "platform.deepseek.com", json: true },
   openai: { name: "ChatGPT (OpenAI)", base: "https://api.openai.com/v1", model: "gpt-4o-mini", cost: "💳 پولی (API رایگان ندارد)", keyUrl: "platform.openai.com/api-keys", json: true },
   custom: { name: "سفارشی (سازگار با OpenAI)", base: "", model: "", cost: "", keyUrl: "", json: false },
@@ -25,6 +25,10 @@ export const isProvider = (x: string): x is ProviderId => x in PROVIDERS;
 
 export interface LlmCfg { id: ProviderId; name: string; base: string; model: string; key: string; json: boolean }
 
+export const AI_BASE = "workers-ai-binding";
+let AI: Env["AI"];
+export const getAi = () => AI;
+const hasAi = (env: Env) => !!env.AI && !envOf(env, "DISABLE_WORKERS_AI");
 const envOf = (env: Env, name: string): string => ((env as unknown as Record<string, string | undefined>)[name] || "").trim();
 
 // ---- settings: ONE query per invocation (free-plan D1 limit is 50 queries per request), cached for a few seconds
@@ -43,6 +47,7 @@ const del = async (env: Env, key: string) => { await env.DB.prepare("DELETE FROM
 
 /** Key from a Secret (GEMINI_API_KEY, GROQ_API_KEY, … ; legacy LLM_API_KEY = DeepSeek, or "custom" when LLM_BASE_URL is set) or the one the admin saved. */
 async function keyOf(env: Env, id: ProviderId, m: Map<string, string>): Promise<{ key: string; fromEnv: boolean }> {
+  if (id === "cloudflare" && hasAi(env)) return { key: "binding", fromEnv: true };   // keyless: the Worker's own AI binding
   const legacy = envOf(env, "LLM_API_KEY") && (envOf(env, "LLM_BASE_URL") ? id === "custom" : id === "deepseek") ? envOf(env, "LLM_API_KEY") : "";
   const e = envOf(env, `${id.toUpperCase()}_API_KEY`) || legacy;
   if (e) return { key: e, fromEnv: true };
@@ -53,11 +58,12 @@ async function keyOf(env: Env, id: ProviderId, m: Map<string, string>): Promise<
 export interface ProviderState { id: ProviderId; info: ProviderInfo; hasKey: boolean; fromEnv: boolean; model: string; base: string; active: boolean; coolUntil: number }
 
 export async function listProviders(env: Env): Promise<ProviderState[]> {
+  AI = hasAi(env) ? env.AI : undefined;
   const m = await all(env), active = m.get("llm_active") as ProviderId | undefined;
   const out: ProviderState[] = [];
   for (const id of PROVIDER_IDS) {
     const info = PROVIDERS[id], k = await keyOf(env, id, m);
-    const base = envOf(env, `${id.toUpperCase()}_BASE_URL`) || (id === "custom" ? envOf(env, "LLM_BASE_URL") : "") || m.get(`llm_base:${id}`) || info.base;
+    const base = (id === "cloudflare" && hasAi(env) ? AI_BASE : "") || envOf(env, `${id.toUpperCase()}_BASE_URL`) || (id === "custom" ? envOf(env, "LLM_BASE_URL") : "") || m.get(`llm_base:${id}`) || info.base;
     const model = (id === "custom" ? envOf(env, "LLM_MODEL") : "") || m.get(`llm_model:${id}`) || info.model;
     out.push({ id, info, hasKey: !!k.key, fromEnv: k.fromEnv, model, base: base.replace(/\/+$/, ""), active: active === id, coolUntil: parseInt(m.get(`llm_cool:${id}`) || "0", 10) });
   }

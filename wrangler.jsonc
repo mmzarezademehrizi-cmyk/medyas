@@ -6,5 +6,6 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "medyas-db", "migrations_dir": "migrations" }
   ],
+  "ai": { "binding": "AI" },
   "triggers": { "crons": ["* * * * *"] }
 }

@@ -1,7 +1,7 @@
 // OpenAI-compatible chat client used by the agent. It walks the provider chain (active first): if one fails because of quota,
 // balance, an invalid key, a rate limit or an outage, the next configured provider is tried automatically.
 import { Env } from "./env";
-import { LlmCfg, llmChain, markCooldown } from "./providers";
+import { AI_BASE, LlmCfg, getAi, llmChain, markCooldown } from "./providers";
 
 export interface ToolDef { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export interface ChatMsg { role: "system" | "user" | "assistant" | "tool"; content?: string | null; name?: string; tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[]; tool_call_id?: string }
@@ -18,7 +18,26 @@ export function httpReason(status: number): string {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** One request to one provider. Throws Error(reason) on any failure; retries once on 429/5xx. */
+/** Workers AI through the Worker's own binding (no key). Output is converted to the OpenAI chat-completions shape. */
+async function viaBinding(cfg: LlmCfg, body: Record<string, unknown>): Promise<any> {
+  const ai = getAi();
+  if (!ai) throw new Error("اتصال Workers AI (binding) فعال نیست");
+  const msgs = (body.messages as ChatMsg[]).map((m) => m.tool_calls
+    ? { role: "assistant", content: m.content || "", tool_calls: m.tool_calls.map((c) => ({ id: c.id, type: "function", function: { name: c.function.name, arguments: c.function.arguments } })) }
+    : m);
+  let r: any;
+  try { r = await ai.run(cfg.model, { messages: msgs, max_tokens: body.max_tokens, temperature: body.temperature, ...(body.tools ? { tools: (body.tools as ToolDef[]).map((t) => t.function) } : {}) }); }
+  catch (e) {
+    const t = String((e as Error).message || e);
+    throw Object.assign(new Error(/limit|quota|neurons|capacity/i.test(t) ? httpReason(429) : `Workers AI: ${t.slice(0, 120)}`), /limit|quota|neurons|capacity/i.test(t) ? { status: 429 } : {});
+  }
+  if (r?.choices?.[0]?.message) return r;
+  const calls = (r?.tool_calls || []).map((c: any, i: number) => ({ id: `cf_${Date.now().toString(36)}_${i}`, type: "function", function: { name: c.name, arguments: typeof c.arguments === "string" ? c.arguments : JSON.stringify(c.arguments || {}) } }));
+  return { choices: [{ message: { role: "assistant", content: typeof r?.response === "string" ? r.response : null, ...(calls.length ? { tool_calls: calls } : {}) } }] };
+}
+
 export async function callOne(cfg: LlmCfg, body: Record<string, unknown>, timeoutMs = 45_000): Promise<any> {
+  if (cfg.base === AI_BASE) return viaBinding(cfg, body);
   for (let attempt = 0; attempt < 2; attempt++) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
