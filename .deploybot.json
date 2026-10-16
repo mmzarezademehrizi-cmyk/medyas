@@ -17,11 +17,6 @@
       "generate": "hex"
     },
     {
-      "name": "GEMINI_API_KEY",
-      "prompt": "اختیاری ولی لازم برای «ایجنت هوشمند» (رایگان): کلید Gemini از aistudio.google.com/apikey. می‌توانید بعداً از «🛠 مدیریت ← 🧠 تنظیم هوش مصنوعی» داخل ربات هم ثبت کنید (OpenRouter و ChatGPT و DeepSeek هم همان‌جا).",
-      "optional": true
-    },
-    {
       "name": "EITAA_API_BASE",
       "prompt": "اختیاری: آدرس رله‌ی ایتایار اگر مستقیم کار نکرد (پیش‌فرض https://eitaayar.ir/api)",
       "optional": true
