@@ -32,7 +32,9 @@ export async function start(env: Env, u: UserRow): Promise<void> {
 const TOOLS: ToolDef[] = [
   { type: "function", function: { name: "read_channel", description: "Latest posts of a PUBLIC Eitaa channel (@id), newest first, short previews (ref, text; image/sticker=1).",
     parameters: { type: "object", properties: { channel: { type: "string" } }, required: ["channel"] } } },
-  { type: "function", function: { name: "post_to_channel", description: "Send a post to one of his channels NOW (real result is returned). To forward a source post pass from_ref (full text copied by the system) and/or image_ref (image or sticker; for a sticker omit text).",
+  { type: "function", function: { name: "send_to_me", description: "Show/send something to HIM in this Telegram chat (NOT to any channel): use for \"show me / send me / برام بفرست / نشانم بده\". Pass from_ref (full post text) and/or image_ref, or your own text.",
+    parameters: { type: "object", properties: { text: { type: "string" }, from_ref: { type: "string" }, image_ref: { type: "string" } } } } },
+  { type: "function", function: { name: "post_to_channel", description: "PUBLISH to one of HIS OWN channels NOW, only when he explicitly asks to post/publish/send something into his channel (کانالم). Never for \"send me\". The text must be real post content, never an instruction. To forward a source post (real result is returned). To forward a source post pass from_ref (full text copied by the system) and/or image_ref (image or sticker; for a sticker omit text).",
     parameters: { type: "object", properties: { text: { type: "string" }, from_ref: { type: "string" }, image_ref: { type: "string" }, channel_id: { type: "integer", description: "optional if he has one channel" } } } } },
   { type: "function", function: { name: "schedule_post", description: "Schedule a text post. when: \"18:30\", \"فردا 09:00\", \"+45\" (minutes), \"1405/07/20 18:30\" (Tehran).",
     parameters: { type: "object", properties: { text: { type: "string" }, when: { type: "string" }, channel_id: { type: "integer" } }, required: ["text", "when"] } } },
@@ -54,6 +56,7 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
   const tnow = now(), l = toLocal(tnow);
   const system =
     `LIVE CHAT RULES. You are the live assistant of an Eitaa channel owner; chat in Persian, briefly. Act with tools immediately when he clearly asks (send, test message, read a channel, forward a sticker…); ask ONE short question only if something essential is missing. ` +
+    `IMPORTANT: "برام/واسم/بهم/نشانم بده/به من بفرست" = show it to HIM in this chat → read_channel then send_to_me. Use post_to_channel ONLY when he clearly says to put/post/send into HIS channel (کانالم، توی کانال من). A channel he merely names (@x) is a source to read, not a destination. `+
     `Post exactly the text he asks, no signature unless asked. Only PUBLIC channels he names can be read (no global search). Use from_ref/image_ref to forward posts instead of retyping. ` +
     `Today (Tehran): ${jalaliLong(tnow)} | ${l.y}-${pad2(l.mo)}-${pad2(l.d)} ${pad2(l.h)}:${pad2(l.mi)}\n` +
     `HIS CHANNELS: ${chans.map((x) => `id=${x.id} «${x.title}» (@${x.chat_id})`).join("; ")}`;
@@ -68,10 +71,26 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
     (await env.DB.prepare("INSERT INTO posts(user_id,channel_id,kind,text,file_id,file_name,title,silent,pin,view_delete,run_at,status,created_at,src_url) VALUES(?,?,?,?,'',?,'',0,0,0,?,'pending',?,?)")
       .bind(uid, ch.id, kind, body, name, runAt, now(), file).run()).meta.last_row_id as number;
 
+  const toMe = /(واسم|برام|برایم|بهم|نشانم|نشونم|به من|برای من|بفرست برام)/.test(text) && !/(کانالم|کانال من|کانال خودم|داخل کانال من|توی کانال من)/.test(text);
+  const tools = toMe ? TOOLS.filter((x) => x.function.name !== "post_to_channel" && x.function.name !== "schedule_post") : TOOLS;
   const notes: string[] = [];   // outcome lines written by the code itself (truthful, and no extra LLM round-trip)
   const exec = async (name: string, a: any): Promise<unknown> => {
     switch (name) {
       case "read_channel": { await show(`🔎 در حال خواندن @${esc(String(a.channel || ""))}…`); return readChannel(env, st, a, null, 4); }
+      case "send_to_me": {
+        const p = resolvePost(st, a, "");
+        if ("error" in p) return { status: "failed", error: p.error };
+        try {
+          if (p.sticker && p.image) await tg.tg(env, "sendSticker", { chat_id: uid, sticker: p.image });
+          else if (p.image) await tg.tg(env, "sendPhoto", { chat_id: uid, photo: p.image, caption: p.text.slice(0, 1000) });
+          else await tg.send(env, uid, esc(p.text));
+          if (p.image && !p.sticker && p.text.length > 1000) await tg.send(env, uid, esc(p.text));
+        } catch (e) {
+          if (p.text) await tg.send(env, uid, esc(p.text)); else return { status: "failed", error: (e as Error).message };
+        }
+        notes.push("📨 برای شما فرستاده شد.");
+        return { status: "sent_to_user" };
+      }
       case "post_to_channel": {
         const ch = pick(a.channel_id);
         if (typeof ch === "string") return { status: "failed", error: ch };
@@ -104,7 +123,7 @@ export async function turn(c: Ctx, user: UserRow, m: TgMessage, text: string, da
   try {
     for (let step = 0; step < MAX_STEPS; step++) {
       if (Date.now() - t0 > BUDGET_MS) { answer = "⏱ زمان این درخواست تمام شد؛ اگر کار کامل نشد دوباره بگویید."; break; }
-      const r = await chatTools(env, messages, TOOLS, STEP_TIMEOUT_MS, 700);
+      const r = await chatTools(env, messages, tools, STEP_TIMEOUT_MS, 700);
       messages.push(r);
       if (!r.tool_calls?.length) { answer = esc((r.content || "").trim()); break; }
       let onlyActions = true;

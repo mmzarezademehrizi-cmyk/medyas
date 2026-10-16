@@ -100,7 +100,7 @@ async def llm(req):
         return reply(calls=[tool_call(0, "ping", {"value": 1})])
     system = msgs[0]["content"]
     if "LIVE CHAT RULES" in system:
-        return live_chat(msgs, system)
+        return live_chat(msgs, system, tools)
     if not tools:      # planner
         instr = msgs[-1]["content"]
         times = ["07:00"] if ("۷" in instr or "7" in instr) else (["09:00", "14:00"] if "۹ و ۱۴" in instr else [])
@@ -141,7 +141,7 @@ async def llm(req):
     return reply(content="کاری برای انجام نبود.")
 
 
-def live_chat(msgs, system):
+def live_chat(msgs, system, tools=None):
     utext = [m for m in msgs if m["role"] == "user"][-1]["content"]
     names = {c["id"]: c["function"]["name"] for m in msgs if m.get("tool_calls") for c in m["tool_calls"]}
     results = {names[m["tool_call_id"]]: json.loads(m["content"]) for m in msgs if m["role"] == "tool"}
@@ -151,6 +151,13 @@ def live_chat(msgs, system):
             return reply(calls=[tool_call(1, "read_channel", {"channel": "sticker_ch"})])
         st = [p for p in results["read_channel"]["posts"] if p.get("sticker")]
         return reply(calls=[tool_call(2, "post_to_channel", {"image_ref": st[0]["ref"]})])
+    if "واسم" in utext:
+        if "read_channel" not in called:
+            return reply(calls=[tool_call(4, "read_channel", {"channel": "sport_ch"})])
+        p0 = results["read_channel"]["posts"][0]
+        if not any(t["function"]["name"] == "send_to_me" for t in (tools or [])):
+            return reply(calls=[tool_call(5, "post_to_channel", {"text": "آخرین پست @sport_ch"})])
+        return reply(calls=[tool_call(5, "send_to_me", {"from_ref": p0["ref"]})])
     if "سلام" in utext:
         args = {"text": "سلام"}
         mm = re.search(r"id=(\d+) «خراب»", system)

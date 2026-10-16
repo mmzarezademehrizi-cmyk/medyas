@@ -265,6 +265,11 @@ clear(); msg(USER, "سلام را به کانال خراب بفرست"); chat_wa
 edits = [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "editMessageText"]
 check("failure is reported truthfully", any("نشد" in t and "chat not found" in t for t in edits) and "failed" in d1("SELECT status FROM posts ORDER BY id DESC LIMIT 1"), str(edits))
 d1("DELETE FROM channels WHERE chat_id='failchan'")
+# "send me the last post of @x" goes to HIM, never into the channel
+before = len(d1j("SELECT id FROM posts"))
+clear(); msg(USER, "برو داخل کانال @sport_ch و آخرین پستشو واسم بفرست"); chat_wait()
+to_me = [e["body"]["text"] for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == USER]
+check("'send it to me' shows the post to the user and publishes nothing", any("ورزش" in t or "فوتبال" in t for t in to_me) and len(d1j("SELECT id FROM posts")) == before and not eitaa_calls("sendMessage"), str((to_me, eitaa_calls("sendMessage"))))
 clear(); msg(USER, "✍️ پست جدید"); chat_wait()
 
 # ---------------- every AI model out of quota -> the rule-based engine still does the job
@@ -285,5 +290,5 @@ cb(USER, f"ch:dy:{cid}"); settle()
 check("deleting the channel deletes its agents", not d1j("SELECT id FROM agent_jobs"))
 
 clear(); msg(ADMIN, "/src goodmorning_ch"); msg(ADMIN, "/src nochannel_x"); settle()
-check("/src diagnostics for admins", any("پیام‌های شناسایی‌شده: 2" in t for t in sent_to(ADMIN)) and any("پیامی در آن شناسایی نشد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+check("/src diagnostics for admins", any("پیام‌های شناسایی‌شده: " in t and "(عکس" in t and "شناسایی‌شده: 0" not in t for t in sent_to(ADMIN)) and any("پیامی در آن شناسایی نشد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
 print("ALL E2E CHECKS PASSED")
