@@ -22,7 +22,7 @@ const INTRO = "💬 <b>گفتگوی زنده با ایجنت</b>\n\nهر چه م
   "خروج: /cancel یا هر دکمه‌ی منو.";
 
 export async function start(env: Env, u: UserRow): Promise<void> {
-  if (!(await llmReady(env))) return void (await tg.send(env, u.id, "⏳ ایجنت هنوز فعال نشده است (مدیر باید یک سرویس هوش مصنوعی را در «🛠 مدیریت» تنظیم کند)."));
+  if (!(await llmReady(env))) return void (await tg.send(env, u.id, "⏳ ایجنت هنوز فعال نشده است (بایندینگ AI در wrangler.jsonc فعال نیست)."));
   if (!u.eitaa_token_enc) return void (await tg.send(env, u.id, "ابتدا از «برنامه‌های متصل» توکن ایتایار را ثبت کنید."));
   if (!(await userChannels(env, u.id)).length) return void (await tg.send(env, u.id, "ابتدا از «کانال‌ها» کانال خودتان را اضافه کنید."));
   await setSession(env, u.id, "chat", { hist: [], last_mid: 0, busy_until: 0 });

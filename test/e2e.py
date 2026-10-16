@@ -146,25 +146,11 @@ def tick(n=1):
 def setpage(name, posts): c.post(f"{M}/_page/{name}", json=posts)
 def buttons(user):
     return " ".join(json.dumps(e["body"].get("reply_markup", ""), ensure_ascii=False) for e in log() if e["svc"] == "tg" and e["method"] == "sendMessage" and e["body"]["chat_id"] == user)
-# ---------------- the agent needs the admin's LLM key first
-clear(); msg(USER, "🤖 ایجنت هوشمند"); settle()
-check("agents inactive until the admin saves an LLM key", any("هنوز فعال نشده" in t for t in sent_to(USER)), str(sent_to(USER)))
+# ---------------- the brain = Workers AI binding (replaced by the fake LLM in tests); no keys, no AI panel
 clear(); msg(ADMIN, "🛠 مدیریت"); settle()
-check("admin panel offers the AI settings", "ad:pl:x" in buttons(ADMIN), buttons(ADMIN))
-# custom provider (OpenAI-compatible) pointing at the fake LLM, with a key that has no balance (HTTP 402)
-cb(ADMIN, "ad:pb:custom"); msg(ADMIN, "http://127.0.0.1:9999/llm"); cb(ADMIN, "ad:pm:custom"); msg(ADMIN, "mock-model"); cb(ADMIN, "ad:pk:custom"); msg(ADMIN, "testkey_NOBALANCE"); settle()
-check("key message deleted", any(e["method"] == "deleteMessage" for e in log()))
-check("keys encrypted at rest", "testkey_NOBALANCE" not in d1("SELECT value FROM settings WHERE key LIKE 'llm_key:%'"))
-clear(); cb(ADMIN, "ad:pt:custom"); settle()
-check("test button explains a 402", any("اعتبار حساب تمام شده" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
-clear(); msg(USER, "🤖 ایجنت هوشمند"); cb(USER, "ag:new"); msg(USER, "هر روز ساعت ۷ پیام تست بگذار برای من"); msg(USER, "-"); settle()
-check("planner failure shows the real reason", any("اعتبار حساب تمام شده" in t for t in sent_to(USER)), str(sent_to(USER)))
-clear(); cb(USER, "ag:x"); settle()
-# a second provider (OpenRouter preset, base overridden by env for the test) with a working key becomes the automatic fallback
-clear(); cb(ADMIN, "ad:pk:openrouter"); msg(ADMIN, "testkey_LLM123"); cb(ADMIN, "ad:pt:openrouter"); settle()
-check("openrouter test OK incl. tool calling", any("function calling" in t and "✅" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
-check("provider that returned 402 rests on a cooldown", int(d1j("SELECT value FROM settings WHERE key='llm_cool:custom'")[0]["value"]) > time.time(), "no cooldown")
-check("first saved provider stays active", d1j("SELECT value FROM settings WHERE key='llm_active'")[0]["value"] == "custom")
+check("admin panel has no key/provider settings", "ad:pl" not in buttons(ADMIN) and any("هوش مصنوعی ایجنت: ✅" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+clear(); msg(USER, "🤖 ایجنت هوشمند"); settle()
+check("agents available immediately", not any("هنوز فعال نشده" in t for t in sent_to(USER)), str(sent_to(USER)))
 
 # ---------------- create a free-text "good morning" agent
 setpage("goodmorning_ch", [OLD_MORNING, NEW_MORNING])
@@ -281,6 +267,16 @@ check("failure is reported truthfully", any("نشد" in t and "chat not found" i
 d1("DELETE FROM channels WHERE chat_id='failchan'")
 clear(); msg(USER, "✍️ پست جدید"); chat_wait()
 
+# ---------------- every AI model out of quota -> the rule-based engine still does the job
+chj = d1j(f"SELECT channel_id, user_id FROM agent_jobs WHERE id={J2}")[0]
+setpage("sport_ch", [sp(50, "تبلیغ ویژه! خرید ارزان لوازم ورزش\n@sport_ch"), sp(51, "ورزش و تمرین‌های مفید برای تقویت عضلات پا و بدنسازی در خانه\n\nعضو شوید 👈 @sport_ch")])
+d1("DELETE FROM agent_seen")
+d1(f"INSERT INTO agent_jobs(user_id,channel_id,name,instruction,times,days,once_at,footer,approve,enabled,run_now,last_key,attempts,created_at) VALUES({chj['user_id']},{chj['channel_id']},'quota','از کانال @sport_ch یک مطلب درباره‌ی ورزش بیاور QUOTA','[]',NULL,NULL,'🆔 @mychan',0,1,1,'',0,0)")
+QJ = job_id()
+clear(); tick(3)
+qrows = d1j(f"SELECT text FROM posts WHERE job_id={QJ}")
+check("quota exhausted: rules-based fallback published a clean, non-ad post", len(qrows) == 1 and "تبلیغ" not in qrows[0]["text"] and "@sport_ch" not in qrows[0]["text"] and qrows[0]["text"].endswith("🆔 @mychan"), str(qrows))
+d1(f"DELETE FROM agent_jobs WHERE id={QJ}")
 # ---------------- isolation + cleanup
 clear(); cb(OTHER, f"ag:tg:{J2}"); settle()
 check("another user cannot touch my agent", d1j(f"SELECT enabled FROM agent_jobs WHERE id={J2}")[0]["enabled"] == 1)
@@ -289,5 +285,5 @@ cb(USER, f"ch:dy:{cid}"); settle()
 check("deleting the channel deletes its agents", not d1j("SELECT id FROM agent_jobs"))
 
 clear(); msg(ADMIN, "/src goodmorning_ch"); msg(ADMIN, "/src nochannel_x"); settle()
-check("/src diagnostics for admins", any("پیام‌های شناسایی‌شده: 1" in t for t in sent_to(ADMIN)) and any("پیامی در آن شناسایی نشد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
+check("/src diagnostics for admins", any("پیام‌های شناسایی‌شده: 2" in t for t in sent_to(ADMIN)) and any("پیامی در آن شناسایی نشد" in t for t in sent_to(ADMIN)), str(sent_to(ADMIN)))
 print("ALL E2E CHECKS PASSED")

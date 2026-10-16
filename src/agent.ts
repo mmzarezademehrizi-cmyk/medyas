@@ -9,7 +9,7 @@ import { llmReady } from "./providers";
 import { cleanText, fetchChannel, norm } from "./source";
 import * as tg from "./tg";
 import { Btn, ikb } from "./tg";
-import { WEEKDAYS, atTime, esc, fmtDt, fromLocal, jalaliLong, normDigits, normalizeChatId, pad2, slotKey, toLocal } from "./util";
+import { WEEKDAYS, atTime, esc, fmtDt, fromLocal, jalaliLong, mentionsDay, mentionsOtherDate, normDigits, normalizeChatId, pad2, slotKey, toLocal } from "./util";
 
 const MAX_STEPS = 9;
 const MAX_CHANNELS_PER_RUN = 5;
@@ -47,7 +47,17 @@ export function describeSchedule(j: { times: string; days: string | null; once_a
 /** Turns the owner's sentence into a schedule + short name + a one-line summary of what the agent will do. */
 export async function planJob(env: Env, instruction: string): Promise<Plan | null> {
   const t = now(), l = toLocal(t);
-  const r = await chatJson(env,
+  let r: any;
+  try { r = await planWithModel(env, instruction, t, l); }
+  catch {   // models unavailable: read the schedule with plain rules
+    const tm = parseTimes(instruction);
+    return { name: instruction.replace(/@\S+/g, "").trim().slice(0, 30) || "ایجنت", times: Array.isArray(tm) ? tm : [], days: null, onceAt: null,
+      summary: "برنامه با قوانین ساده خوانده شد: " + (Array.isArray(tm) ? `ساعت ${tm.join(" و ")} هر روز.` : "بدون زمان مشخص (فقط «اجرا الان»).") };
+  }
+  if (!r) return null;
+  return planFrom(r, t);
+}
+const planWithModel = (env: Env, instruction: string, t: number, l: ReturnType<typeof toLocal>) => chatJson(env,
     "You read a Persian task description for a channel-content agent and extract its schedule. Reply with a JSON object only: " +
     '{"name": short Persian title (max 30 chars), "times": array of "HH:MM" 24h Tehran times the task runs each day (empty array if no time is stated), ' +
     '"days": null if every day, otherwise array of weekday numbers 0=Sunday,1=Monday,...,6=Saturday (Saturday=شنبه, Friday=جمعه), ' +
@@ -55,7 +65,7 @@ export async function planJob(env: Env, instruction: string): Promise<Plan | nul
     '"summary": one Persian sentence saying exactly what the agent will do}. ' +
     `Now in Tehran: ${l.y}-${pad2(l.mo)}-${pad2(l.d)} ${pad2(l.h)}:${pad2(l.mi)} (${jalaliLong(t)}).`,
     instruction, 600);
-  if (!r) return null;
+function planFrom(r: any, t: number): Plan {
   const times = Array.isArray(r.times) ? (parseTimes((r.times as unknown[]).join(" ")) as string[] | "now" | null) : null;
   const days = Array.isArray(r.days) ? (r.days as unknown[]).map(Number).filter((x) => x >= 0 && x <= 6) : null;
   let onceAt: number | null = null;
@@ -188,6 +198,51 @@ const TOOLS = (final: boolean): ToolDef[] => [
     parameters: { type: "object", properties: { minutes: { type: "integer", description: "5-30" }, reason: { type: "string" } }, required: ["minutes", "reason"] } } }]),
 ];
 
+// ------------------------------------------------------------------ rule-based fallback (no model): used when every AI model is out of quota
+const AD_RE = /تبلیغ|قرعه.?کشی|جایزه|تخفیف|فروش ویژه|ثبت.?نام|سفارش|خرید|کد تخفیف|عضو شوید|لینک عضویت|join|https?:\/\/t\.me|بنر/i;
+const STOP = new Set("از در به با که را این آن برای و یا هر روز ساعت صبح ظهر شب کانال کانالم کانال‌های مطلب مطالب پست بیاور بگذار بذار بگیر درباره مفید باشد نباشد تبلیغ امروز تاریخ همان دقیقا دقیقاً چند یک دو سه بار بعد قبل خودت بنویس".split(/\s+/));
+const words = (t: string) => normDigits(t).replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length >= 3 && !STOP.has(w));
+
+async function heuristicRun(env: Env, j: JobRow, t: number): Promise<RunResult> {
+  const instr = j.instruction, srcs = [...new Set([...instr.matchAll(/@([A-Za-z0-9_.]{3,64})/g)].map((m) => m[1]))].filter((c) => c.toLowerCase() !== "").slice(0, MAX_CHANNELS_PER_RUN);
+  if (!srcs.length) return { summary: "سهمیه‌ی هوش مصنوعی امروز تمام شده و این کار منبع مشخصی ندارد؛ فردا یا با دکمه‌ی «اجرا الان» دوباره تلاش می‌شود.", posts: 0, retryMin: null, error: true };
+  const nm = normDigits(instr).match(/(\d)\s*(?:تا)?\s*(?:مطلب|پست|خبر|مورد)/), want = Math.min(nm ? +nm[1] : 1, 3);
+  const needDate = /تاریخ/.test(instr), topic = new Set(words(instr.replace(/@\S+/g, "")));
+  const st: ReadState = { channels: new Map(), refs: new Map() };
+  const cands: { ref: string; score: number; r: RefInfo }[] = [];
+  const recent = (await env.DB.prepare("SELECT text FROM posts WHERE job_id=? AND created_at>? AND status IN ('pending','draft','sending','sent')").bind(j.id, t - 3 * 86400).all<{ text: string }>()).results;
+  const recentNorm = new Set(recent.map((r) => norm(r.text).replace(/\s+/g, " ").slice(0, 120)));
+  for (const c of srcs) {
+    const res: any = await readChannel(env, st, { channel: c, limit: 20 }, j.id, MAX_CHANNELS_PER_RUN);
+    for (const p of res.posts || []) {
+      const r = st.refs.get(p.ref)!;
+      if (r.sticker || AD_RE.test(r.text) || (r.text.length < 40 && !r.image)) continue;
+      if (needDate && !(mentionsDay(r.text, t) && !mentionsOtherDate(r.text, t))) continue;
+      const hit = words(r.text).filter((w) => topic.has(w)).length;
+      if (!needDate && topic.size > 2 && hit === 0) continue;
+      cands.push({ ref: p.ref, score: hit + Math.min(r.text.length, 600) / 600, r });
+    }
+  }
+  cands.sort((a, b) => b.score - a.score);
+  let n = 0;
+  for (const c of cands) {
+    if (n >= want) break;
+    const p = resolvePost(st, { from_ref: c.ref, ...(c.r.image ? { image_ref: c.ref } : {}) }, j.footer);
+    const q = "error" in p ? resolvePost(st, { from_ref: c.ref }, j.footer) : p;
+    if ("error" in q) continue;
+    const sig = norm(q.text).replace(/\s+/g, " ").slice(0, 120);
+    if (recentNorm.has(sig)) continue;
+    recentNorm.add(sig);
+    const draft = !!j.approve;
+    const ins = await env.DB.prepare("INSERT INTO posts(user_id,channel_id,kind,text,file_id,file_name,title,silent,pin,view_delete,run_at,status,created_at,src_url,job_id) VALUES(?,?,?,?,'',?,'',0,0,0,?,?,?,?,?)")
+      .bind(j.user_id, j.channel_id, q.image ? "file" : "text", q.text, "", now() + n * 20 * 60, draft ? "draft" : "pending", now(), q.image, j.id).run();
+    await env.DB.prepare("INSERT OR IGNORE INTO agent_seen(job_id,k,seen_at) VALUES(?,?,?)").bind(j.id, c.ref, now()).run();
+    if (draft) await tg.send(env, j.user_id, `📝 <b>پیش‌نویس ایجنت «${esc(j.name)}»</b> (#${ins.meta.last_row_id})\n\n${esc(q.text.slice(0, 1500))}`, ikb([[["✅ انتشار", `ag:go:${ins.meta.last_row_id}`], ["🗑 حذف", `ag:no:${ins.meta.last_row_id}`]]] as Btn[][]));
+    n++;
+  }
+  return { summary: n ? `سهمیه‌ی هوش مصنوعی تمام بود؛ با موتور قانون‌محور ${n} پست انتخاب شد.` : "سهمیه‌ی هوش مصنوعی تمام بود و مطلب مناسبی با قوانین ساده پیدا نشد.", posts: n, retryMin: null };
+}
+
 async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promise<RunResult> {
   const ch = await getChannel(env, j.channel_id);
   if (!ch || ch.user_id !== j.user_id) return { summary: "کانال مقصد دیگر وجود ندارد.", posts: 0, retryMin: null, error: true };
@@ -243,7 +298,12 @@ async function runAgent(env: Env, j: JobRow, slot: Slot, final: boolean): Promis
   const tools = TOOLS(final);
   for (let step = 0; step < MAX_STEPS && !state.done; step++) {
     if (Date.now() - t0 > RUN_BUDGET_MS) { state.summary ||= "زمان اجرا تمام شد."; break; }
-    const m = await chatTools(env, messages, tools, 45_000, 900);
+    let m: ChatMsg;
+    try { m = await chatTools(env, messages, tools, 45_000, 900); }
+    catch (e) {
+      if (step === 0 && !state.posts) return heuristicRun(env, j, t);      // every model failed (quota/outage): do the job with plain rules
+      throw e;
+    }
     messages.push(m);
     if (!m.tool_calls?.length) { state.summary ||= (m.content || "").trim().slice(0, 400); break; }
     postedThisStep = 0;

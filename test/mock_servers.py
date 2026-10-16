@@ -93,6 +93,8 @@ async def llm(req):
     if req.headers.get("authorization") != "Bearer testkey_LLM123":
         return web.json_response({"error": "bad key"}, status=401)
     msgs, tools = body["messages"], body.get("tools")
+    if "QUOTA" in json.dumps(msgs, ensure_ascii=False):      # simulates an exhausted daily quota
+        return web.json_response({"error": {"message": "quota"}}, status=429)
     LOG.append({"svc": "llm", "tools": bool(tools), "n": len(msgs), "max_tokens": body.get("max_tokens")})
     if tools and msgs[0]["role"] != "system":      # admin "test" button: expects a tool call
         return reply(calls=[tool_call(0, "ping", {"value": 1})])

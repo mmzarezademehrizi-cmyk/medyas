@@ -20,7 +20,7 @@ const GUIDE =
 // ------------------------------------------------------------------ list
 export async function home(env: Env, u: UserRow): Promise<void> {
   const ready = await llmReady(env);
-  if (!ready) return void (await tg.send(env, u.id, "⏳ ایجنت هوشمند هنوز فعال نشده است (مدیر باید یک سرویس هوش مصنوعی را در «🛠 مدیریت» تنظیم کند)."));
+  if (!ready) return void (await tg.send(env, u.id, "⏳ ایجنت هوشمند هنوز فعال نشده است (بایندینگ AI در wrangler.jsonc فعال نیست)."));
   const jobs = await userJobs(env, u.id);
   const rows: Btn[][] = jobs.map((j) => [[`${j.enabled ? "🟢" : "⚪️"} ${j.name || "ایجنت " + j.id}`.slice(0, 40), `ag:v:${j.id}`] as Btn]);
   if (jobs.length < MAX_JOBS) rows.push([["➕ ایجنت جدید", "ag:new"]]);

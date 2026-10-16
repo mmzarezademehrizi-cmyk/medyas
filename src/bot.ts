@@ -2,7 +2,6 @@ import { enc } from "./crypto";
 import { ChannelRow, PostRow, UserRow, clearSession, getChannel, getSession, getUser, now, setSession, touchUser, userChannels } from "./db";
 import * as eitaa from "./eitaa";
 import { Env, adminIds } from "./env";
-import * as adminAi from "./adminai";
 import * as agentUi from "./agentui";
 import * as chat from "./chat";
 import { llmChain } from "./providers";
@@ -56,7 +55,6 @@ async function onMessage(c: Ctx, m: TgMessage): Promise<void> {
   if (!hasAccess(user, admin) && s.state) { await clearSession(env, uid); return void (await tg.send(env, uid, NO_ACCESS)); }
   switch (s.state) {
     case "token": return gotToken(c, user, m, text);
-    case "ai_key": case "ai_model": case "ai_base": return admin ? adminAi.onText(env, uid, m, s.state, s.data, text) : undefined;
     case "chan_id": return gotChanId(c, user, text);
     case "chan_title": return gotChanTitle(c, user, s.data, text);
     case "chan_rename": return gotRename(c, user, s.data, text);
@@ -238,8 +236,7 @@ async function account(env: Env, u: UserRow, admin: boolean): Promise<void> {
 }
 async function adminPanel(env: Env, uid: number): Promise<void> {
   const chain = await llmChain(env);
-  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + `\n\n🧠 هوش مصنوعی ایجنت: ${chain.length ? "✅ " + chain.map((x) => x.name).join(" ← ") : "❌ تنظیم نشده"}\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code> · <code>/src نام_کانال</code>`,
-    ikb([[["🧠 تنظیم هوش مصنوعی", "ad:pl:x"]]]));
+  await tg.send(env, uid, (await adminCmd(env, "/stats", [])) + `\n\n🧠 هوش مصنوعی ایجنت: ${chain.length ? "✅ " + chain.map((x) => x.name).join(" ← ") : "❌ بایندینگ AI در wrangler.jsonc فعال نیست"}\n\n<code>/grant ID DAYS</code> · <code>/ban ID</code> · <code>/unban ID</code> · <code>/stats</code> · <code>/src نام_کانال</code>`);
 }
 async function adminCmd(env: Env, cmd: string, a: string[]): Promise<string> {
   const id = parseInt(a[0] || "", 10);
@@ -290,7 +287,6 @@ async function onCallback(c: Ctx, q: TgCallback): Promise<void> {
     if (act === "set") { await setSession(env, uid, "token", {}); return void (await tg.send(env, uid, "🔑 توکن ایتایار را بفرستید\n🧹 پیام شما بعد از خواندن پاک می‌شود. لغو: /cancel")); }
     if (act === "del") { await env.DB.prepare("UPDATE users SET eitaa_token_enc='', eitaa_account='' WHERE id=?").bind(uid).run(); return void (await tg.send(env, uid, "🗑 توکن حذف شد.")); }
   }
-  if (kind === "ad" && admin) return adminAi.onCallback(env, q, uid, act, arg);
   if (kind === "ag") return agentUi.onCallback(c, user, admin, q, act, arg, s);
   if (kind === "ch") {
     await tg.answer(env, q.id);

@@ -1,7 +1,7 @@
 // OpenAI-compatible chat client used by the agent. It walks the provider chain (active first): if one fails because of quota,
 // balance, an invalid key, a rate limit or an outage, the next configured provider is tried automatically.
 import { Env } from "./env";
-import { AI_BASE, LlmCfg, getAi, llmChain, markCooldown } from "./providers";
+import { LlmCfg, getAi, llmChain, markCooldown } from "./providers";
 
 export interface ToolDef { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
 export interface ChatMsg { role: "system" | "user" | "assistant" | "tool"; content?: string | null; name?: string; tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[]; tool_call_id?: string }
@@ -37,14 +37,14 @@ async function viaBinding(cfg: LlmCfg, body: Record<string, unknown>): Promise<a
 }
 
 export async function callOne(cfg: LlmCfg, body: Record<string, unknown>, timeoutMs = 45_000): Promise<any> {
-  if (cfg.base === AI_BASE) return viaBinding(cfg, body);
+  if (!cfg.base) return viaBinding(cfg, body);
   for (let attempt = 0; attempt < 2; attempt++) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
       const r = await fetch(`${cfg.base}/chat/completions`, {
         method: "POST", signal: ctl.signal,
-        headers: { "content-type": "application/json", authorization: `Bearer ${cfg.key}`, ...(cfg.id === "openrouter" ? { "x-title": "medyas" } : {}) },
+        headers: { "content-type": "application/json", authorization: `Bearer ${cfg.key}` },
         body: JSON.stringify({ model: cfg.model, ...body }),
       });
       if (!r.ok) {
@@ -96,25 +96,11 @@ export function chatJson(env: Env, system: string, user: string, maxTokens = 150
 /** One step of a tool-calling conversation (OpenAI-compatible function calling). */
 export function chatTools(env: Env, messages: ChatMsg[], tools: ToolDef[], timeoutMs = 45_000, maxTokens = 900): Promise<ChatMsg> {
   return viaChain(env, async (cfg) => {
-    const msgs = cfg.id === "gemini"   // Gemini's compatibility layer wants the tool name on tool results
-      ? messages.map((m) => (m.role === "tool" ? { ...m, name: messages.flatMap((x) => x.tool_calls || []).find((c) => c.id === m.tool_call_id)?.function.name } : m))
-      : messages;
+    const msgs = messages;
     const j = await callOne(cfg, { temperature: 0.3, max_tokens: maxTokens, messages: msgs, tools, tool_choice: "auto" }, timeoutMs);
     const m = j?.choices?.[0]?.message;
     if (!m) throw new Error("پاسخ نامعتبر");
     const calls = (m.tool_calls || []).map((c: any, i: number) => ({ ...c, id: c.id || `call_${Date.now().toString(36)}_${i}`, type: "function" }));
     return { role: "assistant", content: m.content ?? null, ...(calls.length ? { tool_calls: calls } : {}) } as ChatMsg;
   });
-}
-
-/** Admin "test" button: a plain reply AND a tool call (the agent needs tools; not every free model supports them). */
-export async function testProvider(cfg: LlmCfg): Promise<string> {
-  const j = await callOne(cfg, {
-    temperature: 0, max_tokens: 60, tool_choice: "auto",
-    messages: [{ role: "user", content: "Call the function ping with value 1." }],
-    tools: [{ type: "function", function: { name: "ping", description: "ping", parameters: { type: "object", properties: { value: { type: "integer" } }, required: ["value"] } } }],
-  }, 30_000);
-  const m = j?.choices?.[0]?.message;
-  if (m?.tool_calls?.length) return "اتصال ✅ و ابزار (function calling) ✅";
-  return `اتصال ✅ ولی این مدل ابزار را صدا نزد ⚠️ (برای ایجنت مدل دیگری انتخاب کنید): ${String(m?.content || "").slice(0, 40)}`;
 }
